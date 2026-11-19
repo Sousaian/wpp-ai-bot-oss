@@ -10,7 +10,7 @@ from src.config import settings
 from src.database.connection import AsyncSessionLocal, check_db_connection, get_db, engine
 from src.database.repositories import agente_repo, consumo_repo, delivery_state_repo, inbound_event_repo
 from src.database.unit_of_work import UnitOfWork, get_unit_of_work
-from src.routers import agentes_router, atendentes_router, chatwoot_router, sessoes_router
+from src.routers import agentes_router, chatwoot_router, sessoes_router
 from src.services import evolution_orchestrator, replica_compat, scheduler_observability
 from src.services.evolution_client import evolution_client
 from src.services.webhook_auth import WebhookAuthError, verify_evolution_bearer
@@ -145,7 +145,6 @@ app = FastAPI(
     lifespan=lifespan
 )
 app.include_router(agentes_router)
-app.include_router(atendentes_router)
 app.include_router(sessoes_router)
 app.include_router(chatwoot_router)
 # T08-5: 503 bodies carry a stable technical code next to the legacy detail.

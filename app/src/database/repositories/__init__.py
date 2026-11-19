@@ -1,6 +1,5 @@
 from . import (
     agente_repo,
-    atendente_repo,
     delivery_state_repo,
     delivery_worker_repo,
     handoff_attempt_repo,
@@ -15,7 +14,6 @@ from . import (
 
 __all__ = [
     "agente_repo",
-    "atendente_repo",
     "consumo_repo",
     "delivery_state_repo",
     "delivery_worker_repo",
