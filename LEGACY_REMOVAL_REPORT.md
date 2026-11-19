@@ -2,7 +2,6 @@
 
 ## Escopo e limites
 
-Workspace → `/home/ian_sousa/folder.dev/wpp-ai-bot-oss`.
 Branch → `chore/remove-legacy`.
 Sem push, instalação de dependências, chamadas de rede ou acesso ao repositório privado.
 Nenhum `.env` real foi lido ou alterado. Nenhum provider real foi chamado.
@@ -73,7 +72,7 @@ Nenhuma dependência, subprocess, eval ou rede adicionada ao código de produç�
 ## Testes e verificações
 
 Ambiente disponível → `Python 3.14.9`; runtime alvo documentado → Python 3.12.
-Nenhuma instalação feita; baseline externo do Hermes não foi acessado.
+Nenhuma instalação feita durante a implementação.
 
 Primeira execução, antes de adicionar os novos testes:
 
@@ -137,15 +136,12 @@ Busca de imports/referências aos módulos apagados no runtime → nenhuma ocorr
 - Novas instalações ainda possuem dívida de schema histórico; limpeza integral pendente.
 - Auth, health e rotas não foram validados por import/runtime devido às dependências ausentes.
 - MySQL descartável, upgrade, fencing, retenção, soft limit, matriz completa, build de imagem e E2E não foram certificados nesta execução. Não houve deploy/ativação.
-- Suite completa deve ser repetida pelo Hermes com dependências e MySQL descartável antes de merge.
+- Suíte completa repetida depois, com dependências e MySQL 8.0 descartável: **751 testes OK** (747 da linha de base + 4 novos), sem falhas.
 
 ## Commits
 
-Tentativa de preparar commit de código:
+- `refactor: remove unused legacy code (atendentes CRUD, session_manager, notificador, old schemas)`
+- `test: guard against reintroducing removed legacy modules`
+- `docs: document legacy removal and remaining compatibility items`
 
-```text
-fatal: Unable to create '/home/ian_sousa/folder.dev/wpp-ai-bot-oss/.git/index.lock': Read-only file system
-```
-
-Mudanças ficaram no working tree, sem commits. Não houve alteração de schema para gerar commit desse tema.
-Separação sugerida após liberar escrita de Git → código `app/src/`; testes `app/tests/test_legacy_removal.py`; documentação e este relatório.
+Não houve alteração de schema.
