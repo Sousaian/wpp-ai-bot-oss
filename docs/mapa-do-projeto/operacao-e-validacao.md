@@ -129,7 +129,7 @@ Plano pós-F0 aprovado (não executado): D10 adota scheduler antes de tráfego c
 - Gate integrado F0: `run_inbox_ticket08_mysql_matrix.sh`; revisar expected counts no SHA após novas mudanças. Número hardcoded não é evidência.
 - Provas focais: shutdown, borda, provider-auth-validation, preflight fake/Compose real e digests/migrations. Stack de validação pode montar fonte e não representa release imutável.
 - Certificação integrada p55 aceita em5908a94: preflight105/0, seis consumidores, integral746/OK; recontador v1 falhou por intercalação de streams e v2 recontou o mesmo log. Evidência histórica, não teste desta edição documental nem de seu futuro merge. Novas provas devem separar stdout/stderr e contar marcadores por token.
-- CI não configurado no último estado conferido de main/dev. `.test-runs/` é local/ignorado, não retenção automática de evidência.
+- CI: `.github/workflows/ci.yml` (gitleaks, estáticos e suíte completa via `scripts/ci_full_suite.sh`). `.test-runs/` é local/ignorado, não retenção automática de evidência.
 - Checagem estática de documentação verifica links, inventários, defaults e preservação de contratos; não substitui testes de negócio.
 
 Sem `.env` operacional, provider real, `up` D2, prune ou remoção por filtro/curinga em teste. Prefixo descartável aprovado e cleanup nominal; `down -v` não é rotina.

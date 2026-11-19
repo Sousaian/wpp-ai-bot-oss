@@ -177,7 +177,7 @@ Credenciais sintéticas, bancos/recursos descartáveis e logs por execução. N�
 
 Casos em `app/tests/`; matrizes em `scripts/run_*_matrix.sh`. Ler precondições/contagens no SHA alvo antes de executar. Discovery, executados, skips, mutações e exit code precisam de evidência; contagem no script não é prova de suíte verde.
 
-CI não configurado no último estado de `main/dev` conferido. Provas locais anteriores do F0 não são reexecução sobre esta documentação, nem certificam automaticamente futuro SHA de merge/release. Runners usam versão baked e marcam fonte suja com SHA-dirty; não rotular build sujo como release limpo.
+CI no GitHub Actions (`.github/workflows/ci.yml`): em cada PR e push na `main` roda gitleaks, checagens estáticas e a suíte completa com MySQL 8.0 descartável (`scripts/ci_full_suite.sh`, também executável localmente). CI verde não certifica release, deploy nem E2E com providers reais. Runners usam versão baked e marcam fonte suja com SHA-dirty; não rotular build sujo como release limpo.
 
 ## Fora da entrega atual
 
