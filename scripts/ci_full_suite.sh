@@ -57,7 +57,7 @@ docker run --rm --network "container:$db" -v "$repo:/workspace:ro" --tmpfs /runt
     -e EVOLUTION_WEBHOOK_BEARER_TOKEN=synthetic \
     -e CHATWOOT_BASE_URL=http://chatwoot.invalid -e CHATWOOT_API_TOKEN=synthetic \
     -e CHATWOOT_ACCOUNT_ID=1 -e CHATWOOT_WEBHOOK_SECRET=synthetic \
-    -e DELIVERY_WORKER_CODE_VERSION=outbox-v1 \
+    -e "DELIVERY_WORKER_CODE_VERSION=${build_code_version}" \
     "$img" timeout 3600 python -m unittest discover -s /workspace/app/tests -t /workspace/app \
     > "$logs/unittest.log" 2>&1
 rc=$?
@@ -65,7 +65,7 @@ set -e
 echo "::endgroup::"
 
 grep -E "^(FAIL|ERROR): " "$logs/unittest.log" | sed -E 's/ \(.*//' | sort -u > "$logs/failures.txt" || true
-grep -E "^(Ran |OK|FAILED)" "$logs/unittest.log" | tail -3
+grep -E "^(Ran |OK|FAILED)" "$logs/unittest.log" | tail -3 || echo "No unittest summary found (suite aborted?)"
 if [[ "$rc" != 0 ]] || ! grep -qE '^OK' "$logs/unittest.log"; then
     echo "Failing tests:"; cat "$logs/failures.txt"
     tail -80 "$logs/unittest.log"
