@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  secrets-scan:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Run gitleaks
+        run: |
+          docker run --rm -v "$PWD:/repo:ro" ghcr.io/gitleaks/gitleaks:latest \
+            git /repo --no-banner --redact --exit-code 1 \
+            --log-opts="${{ github.event_name == 'pull_request' && format('{0}..{1}', github.event.pull_request.base.sha, github.event.pull_request.head.sha) || '-1' }}"
+
+  static:
+    name: Static checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Byte-compile app
+        run: python -m compileall -q app/src
+      - name: Shell syntax
+        run: |
+          set -e
+          for f in scripts/*.sh; do bash -n "$f"; done
+
+  test:
+    name: Full test suite (MySQL 8.0)
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    needs: static
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run suite
+        env:
+          CI_SUITE_LABEL: gha-${{ github.run_id }}
+          CI_SUITE_LOG_DIR: ${{ runner.temp }}/ci-logs
+        run: bash scripts/ci_full_suite.sh
+      - name: Upload test logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-logs
+          path: ${{ runner.temp }}/ci-logs
+          retention-days: 7

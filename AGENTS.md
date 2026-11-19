@@ -64,7 +64,7 @@ Não usar números antigos de testes ou status de versões como prova de execuç
 | Traycer | Planejamento, artifacts, coordenação e gates |
 | Codex | Implementação e validação conforme roteamento aprovado |
 | Claude | Planejamento/review; fallback de implementação somente quando autorizado |
-| Git/GitHub | Código e PRs em `Sousaian/wpp-ai-bot-oss` (§0); CI não configurado nesta base |
+| Git/GitHub | Código e PRs em `Sousaian/wpp-ai-bot-oss` (§0); CI no GitHub Actions (`.github/workflows/ci.yml`): gitleaks, checagens estáticas e suíte completa com MySQL descartável via `scripts/ci_full_suite.sh` |
 | Docker/Compose | Runtime e provas descartáveis, sem usar volumes operacionais para teste |
 
 Projeto público (Apache-2.0): o código pode ser lido por qualquer ferramenta, mas segredos, `.env` reais, dados de conversas e credenciais de providers nunca saem da máquina do operador. OpenRouter runtime é uma integração diferente, explicitamente existente no produto. Preferências de modelo de desenvolvimento ficam no guia de seleção vigente, não em uma lista inventada neste arquivo.
