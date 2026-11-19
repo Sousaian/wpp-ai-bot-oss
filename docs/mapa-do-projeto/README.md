@@ -23,7 +23,7 @@ Base documental: `main` = `dev` = `5908a94`, snapshot de 2026-11-09. F0 integrad
 3. DDL/shape → `db/init.sql`; classes/acesso → ORM/repositórios.
 4. Defaults → Settings, templates e testes de paridade. Environment real pode divergir, sem autorização para expô-lo.
 5. Deployment → Compose efetivo, autoridades no banco e providers verificados sob procedimento autorizado.
-6. Planejamento aberto → artifacts Traycer; resumo portátil no mapa de estado. Decisão aberta não é fato implementado.
+6. Planejamento aberto → fora do repositório (AGENTS §0.8); resumo portátil no mapa de estado. Decisão aberta não é fato implementado.
 
 Mapa não duplica bodies de triggers, schema completo, todas as flags ou comandos mutáveis: siga as fontes e os runbooks.
 

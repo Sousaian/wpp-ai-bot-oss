@@ -104,7 +104,7 @@ D5 e D6 permanecem abertas. D9/backend/RPO, D11/desenho de deadline e D10/estrat
 
 ## Planejamento durável
 
-Artifacts Traycer deste projeto contêm o detalhamento: `release-operacional`, `revisao-bloqueadores-2026-10-28`, T6–T10/FU-R1–R3 e `portal-multiempresa-auth`. São contexto da ferramenta, não arquivos necessários para clonar/executar o repo; este mapa resume o estado sem links absolutos de máquina como dependência do produto.
+O detalhamento de planejamento (release operacional, bloqueadores, T6–T10/FU-R1–R3 e painel multiusuário) é mantido fora do repositório pelo mantenedor (§0.8). Este mapa resume o estado sem depender desses artefatos.
 
 Fontes operacionais portáteis: [AGENTS](../../AGENTS.md), [delivery](../durable-delivery-runbook.md), [inbox](../inbox-scheduler-runbook.md). Mudança futura deve atualizar as três camadas: contrato, código e mapa correspondente.
 

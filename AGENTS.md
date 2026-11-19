@@ -2,7 +2,21 @@
 
 > **Revisão documental:** 2026-11-09 — runtime v4.1, outbox, scheduler e F0 implementados; ativação operacional separada.
 > **Base desta conciliação:** `main` = `dev` = `5908a94` (PR #14; promoção de main por fast-forward; certificação integrada p55). Esta edição documental não é deploy nem certifica seu futuro SHA de merge.
+> **Repositório:** `Sousaian/wpp-ai-bot-oss` (público, Apache-2.0). Regras de fluxo, higiene pública e testes em [§0](#0-repositório-open-source--regras-de-trabalho) e [CONTRIBUTING.md](CONTRIBUTING.md). Histórico anterior a 2026-11-19 (PRs #1–#17, branch `dev`) existe só no repositório privado de origem e não é referência deste repo.
 > **Regra:** este arquivo concentra instruções e contratos para agentes. Código/SQL descrevem implementação; estado operacional exige verificação própria. Merge não equivale a deploy.
+
+## 0. Repositório open source — regras de trabalho
+
+Vigência: 2026-11-19. Valem para pessoas e agentes (Traycer, Codex, Claude e outros).
+
+1. **Workspace e remoto únicos:** checkout `wpp-ai-bot-oss` (local do mantenedor: `~/folder.dev/wpp-ai-bot-oss`), remoto `origin` = `github.com/Sousaian/wpp-ai-bot-oss`. O repositório privado de origem (`wpp-ai-bot`) é arquivo somente leitura: não editar, não fazer push e não sincronizar automaticamente com ele.
+2. **Branches:** `main` é a única branch de longa duração (não há `dev`). Toda mudança entra em branch própria (`feat/…`, `fix/…`, `docs/…`, `chore/…`) por pull request. Sem push direto em `main`, sem force push e sem reescrever histórico publicado. Merge só com aprovação do mantenedor.
+3. **Higiene pública (bloqueante):** nunca commitar segredos, `.env` reais, tokens, números/JIDs reais de WhatsApp, conversas reais, nomes de clientes ou empresas atendidas, caminhos absolutos de máquina (`/home/...`), IDs de recursos privados ou links para ferramentas internas. Dados de teste só sintéticos (`*.invalid`, `example.invalid`, `55119999990xx`). Antes de abrir PR: varredura com gitleaks (ou equivalente) na árvore e nos commits novos, sem achados reais.
+4. **Licença:** Apache-2.0. Mantenha `LICENSE` e `NOTICE`. Nova dependência exige licença compatível com redistribuição Apache-2.0 (permissivas preferidas); dependência copyleft forte embutida no processo exige aprovação explícita. Serviços externos (Evolution, Chatwoot, MySQL) continuam sob as próprias licenças.
+5. **Posicionamento:** plataforma open source e self-hosted. Não reintroduzir linguagem de produto B2B/SaaS comercial nem roadmap comercial privado na documentação pública.
+6. **Legado:** os módulos removidos em 2026-11-19 (`session_manager`, `notificador`, CRUD/repo de `atendentes`, `models/schemas.py`, `evo-api/`) não voltam; `app/tests/test_legacy_removal.py` protege isso. Itens de compatibilidade mantidos (classe B de `LEGACY_REMOVAL_REPORT.md`) só saem com os pré-requisitos documentados ali, incluindo migração auditada para schema.
+7. **Testes obrigatórios antes de PR:** suíte completa `python -m unittest discover` com MySQL 8.0 descartável em rede interna (credenciais sintéticas), sem falhas. Linha de base atual: **751 testes OK**. Mudança de contrato de documentação atualiza o teste correspondente no mesmo PR. Testes que pulam por falta de MySQL não contam como aprovação.
+8. **Planejamento interno** (tickets, specs, revisões e evidências) fica fora do repositório. A documentação pública resume decisões e estado sem depender desses artefatos.
 
 ## 1. Contexto do Projeto
 
@@ -50,10 +64,10 @@ Não usar números antigos de testes ou status de versões como prova de execuç
 | Traycer | Planejamento, artifacts, coordenação e gates |
 | Codex | Implementação e validação conforme roteamento aprovado |
 | Claude | Planejamento/review; fallback de implementação somente quando autorizado |
-| Git/GitHub | Código, PRs e histórico; CI não configurado nesta base |
+| Git/GitHub | Código e PRs em `Sousaian/wpp-ai-bot-oss` (§0); CI não configurado nesta base |
 | Docker/Compose | Runtime e provas descartáveis, sem usar volumes operacionais para teste |
 
-Projeto privado → não enviar código/contexto a OpenRouter, opencode, Hermes ou modelos locais para desenvolvimento. OpenRouter runtime é uma integração diferente, explicitamente existente no produto. Preferências de modelo de desenvolvimento ficam no guia de seleção vigente, não em uma lista inventada neste arquivo.
+Projeto público (Apache-2.0): o código pode ser lido por qualquer ferramenta, mas segredos, `.env` reais, dados de conversas e credenciais de providers nunca saem da máquina do operador. OpenRouter runtime é uma integração diferente, explicitamente existente no produto. Preferências de modelo de desenvolvimento ficam no guia de seleção vigente, não em uma lista inventada neste arquivo.
 
 ### 2.2 Provider LLM do runtime
 
@@ -2309,11 +2323,12 @@ Runbook operacional do scheduler de inbox: [`docs/inbox-scheduler-runbook.md`](d
 
 ```bash
 # Entrar no repositório e usar a branch de desenvolvimento
-cd ~/folder.dev/wpp-ai-bot
-git checkout dev
+cd wpp-ai-bot-oss
+git checkout main
 
-# Atualizar a branch
-git pull origin dev
+# Atualizar e criar branch de trabalho (§0)
+git pull origin main
+git checkout -b feat/minha-mudanca
 
 # Criar/atualizar ambiente local
 cp .env.example .env   # editar com valores reais; nunca commitar
