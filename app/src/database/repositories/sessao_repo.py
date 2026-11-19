@@ -140,7 +140,6 @@ async def encerrar_locked(
     sessao: Sessao,
     *,
     motivo: str,
-    atendente_id: int | None = None,
     chatwoot_conversation_id: int | None = None,
 ) -> None:
     """Close the session without reacquiring it in another lock order."""
@@ -148,32 +147,15 @@ async def encerrar_locked(
     sessao.handler = "encerrada"
     sessao.encerrada_em = datetime.utcnow()
     sessao.motivo_encerramento = motivo
-    if atendente_id is not None:
-        sessao.atendente_id = atendente_id
     if chatwoot_conversation_id is not None:
         sessao.chatwoot_conversation_id = chatwoot_conversation_id
     await db.flush()
-
-
-async def set_handler(db: AsyncSession, sessao_id: int, handler: str, motivo: str = None) -> Sessao | None:
-    """Atualiza handler da sessão."""
-    result = await db.execute(select(Sessao).where(Sessao.id == sessao_id))
-    sessao = result.scalar_one_or_none()
-    if not sessao:
-        return None
-    sessao.handler = handler
-    if motivo:
-        sessao.motivo_handoff = motivo
-    await db.flush()
-    logger.info(f"Handler atualizado para '{handler}': sessao={sessao_id}")
-    return sessao
 
 
 async def encerrar_sessao(
     db: AsyncSession,
     sessao_id: int,
     motivo: str,
-    atendente_id: int | None = None,
     chatwoot_conversation_id: int | None = None,
 ) -> None:
     """Marca a sessão como encerrada com metadados de encerramento."""
@@ -185,8 +167,6 @@ async def encerrar_sessao(
     sessao.handler = "encerrada"
     sessao.encerrada_em = datetime.utcnow()
     sessao.motivo_encerramento = motivo
-    if atendente_id is not None:
-        sessao.atendente_id = atendente_id
     if chatwoot_conversation_id is not None:
         sessao.chatwoot_conversation_id = chatwoot_conversation_id
 

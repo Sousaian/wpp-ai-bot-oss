@@ -19,10 +19,9 @@ Base `main` = `dev` = `5908a94`, snapshot documental de 2026-11-09: F0 integrado
 | --- | --- |
 | [agentes.py](../../app/src/routers/agentes.py) | `/agentes`, CRUD/allowlist e consumo por agente |
 | [sessoes.py](../../app/src/routers/sessoes.py) | Leitura/histórico, transferir/retomar, delete fenced |
-| [atendentes.py](../../app/src/routers/atendentes.py) | Cadastro legado ainda registrado |
 | [chatwoot.py](../../app/src/routers/chatwoot.py) | Assinatura/parse e delegação de `/chatwoot/webhook` |
 
-`Depends(get_db)` não é autenticação. CRUD continua sem auth de operador; Nginx F0 o bloqueia, acesso direto ao app pela rede Docker permanece privilegiado. Schemas ativos estão nos próprios routers; [models/schemas.py](../../app/src/models/schemas.py) é legado, não fonte única de todos os schemas.
+`Depends(get_db)` não é autenticação. CRUD continua sem auth de operador; Nginx F0 o bloqueia, acesso direto ao app pela rede Docker permanece privilegiado. Schemas ativos estão nos próprios routers. Schemas MVP sem consumidores foram removidos.
 
 ## Negócio e providers
 
@@ -61,7 +60,6 @@ Todos os nomes abaixo estão em [database/repositories/](../../app/src/database/
 | `agente_repo.py` | Configuração/leitura do agente |
 | `sessao_repo.py` | Sessão, handler, mapping e sequência |
 | `mensagem_repo.py` | Persistência/histórico |
-| `atendente_repo.py` | Cadastro legado |
 | `consumo_repo.py` | Ledger, totais, limite e destino seguro do uso |
 | `usage_reconciliation_repo.py` | Pendências de reconciliação |
 | `inbound_event_repo.py` | Receipts, HMAC, identidade/replay |
@@ -110,7 +108,6 @@ Não deslocar SQL de negócio para router/service novo. [Mapa de dados](dados.md
 - [app/tests/](../../app/tests/) → unitários, contratos, MySQL, concorrência/shutdown e fixtures.
 - [scripts/](../../scripts/) → wrappers de matrizes/mutações, shape/digests, medição e provisionamento; nem todos read-only.
 - [tests/provider_contracts/](../../tests/provider_contracts/) e [Compose de validação](../../docker-compose.provider-auth-validation.yml) → contratos isolados, não deployment principal.
-- [session_manager.py](../../app/src/services/session_manager.py), [notificador.py](../../app/src/services/notificador.py), schemas/atendentes legados → não expandir nem remover sem compatibilidade.
 - `agents/agent_config.py` não existe nesta base.
 
 ## Investigação por sintoma
@@ -124,3 +121,7 @@ Não deslocar SQL de negócio para router/service novo. [Mapa de dados](dados.md
 | Agente não usa scheduler | Opt-in → flags/estado/epochs → frota |
 | Health lento | main → pool/DB → caches/frota → snapshot |
 | Processo não encerra | app_server/watchdog → quiescência → deadlines/heartbeat |
+
+### Remoção de superfície legada — 2026-11-19
+
+CRUD de cadastro v3b, armazenamento JSON, notificação WhatsApp v3b e schemas MVP sem consumidores foram removidos. Handoff permanece no Chatwoot. Schema/ORM histórico e compatibilidade operacional permanecem; nenhuma migration destrutiva foi adicionada. Inventário, limites e procedimento de backup → [relatório de remoção](../../LEGACY_REMOVAL_REPORT.md).

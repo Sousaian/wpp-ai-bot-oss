@@ -101,3 +101,7 @@ Enum não é licença para transitar entre quaisquer estados: guards/allowlists 
 - Antes de nova FK, auditar todo delete/purge dependente. Mudança de DDL requer prova sobre banco novo, populado/copied e reaplicação idempotente.
 
 Limitação conhecida: geração não agendada grava uso na mesma UoW do webhook; rollback pós-provider pode apagar ledger/reconciliação. Scheduler tem attempt durável anterior, não uma garantia mágica de reconstrução exata de resposta remota desconhecida.
+
+### Remoção de superfície legada — 2026-11-19
+
+CRUD de cadastro v3b, armazenamento JSON, notificação WhatsApp v3b e schemas MVP sem consumidores foram removidos. Handoff permanece no Chatwoot. Schema/ORM histórico e compatibilidade operacional permanecem; nenhuma migration destrutiva foi adicionada. Inventário, limites e procedimento de backup → [relatório de remoção](../../LEGACY_REMOVAL_REPORT.md).
