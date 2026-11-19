@@ -135,3 +135,7 @@ Plano pós-F0 aprovado (não executado): D10 adota scheduler antes de tráfego c
 Sem `.env` operacional, provider real, `up` D2, prune ou remoção por filtro/curinga em teste. Prefixo descartável aprovado e cleanup nominal; `down -v` não é rotina.
 
 Runbooks: [delivery](../durable-delivery-runbook.md), [inbox](../inbox-scheduler-runbook.md). Budgets/estados/rollback continuam nesses contratos e AGENTS.
+
+### Remoção de superfície legada — 2026-11-19
+
+CRUD de cadastro v3b, armazenamento JSON, notificação WhatsApp v3b e schemas MVP sem consumidores foram removidos. Handoff permanece no Chatwoot. Schema/ORM histórico e compatibilidade operacional permanecem; nenhuma migration destrutiva foi adicionada. Inventário, limites e procedimento de backup → [relatório de remoção](../../LEGACY_REMOVAL_REPORT.md).

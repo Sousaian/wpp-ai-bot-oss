@@ -107,3 +107,7 @@ D5 e D6 permanecem abertas. D9/backend/RPO, D11/desenho de deadline e D10/estrat
 Artifacts Traycer deste projeto contêm o detalhamento: `release-operacional`, `revisao-bloqueadores-2026-10-28`, T6–T10/FU-R1–R3 e `portal-multiempresa-auth`. São contexto da ferramenta, não arquivos necessários para clonar/executar o repo; este mapa resume o estado sem links absolutos de máquina como dependência do produto.
 
 Fontes operacionais portáteis: [AGENTS](../../AGENTS.md), [delivery](../durable-delivery-runbook.md), [inbox](../inbox-scheduler-runbook.md). Mudança futura deve atualizar as três camadas: contrato, código e mapa correspondente.
+
+### Remoção de superfície legada — 2026-11-19
+
+CRUD de cadastro v3b, armazenamento JSON, notificação WhatsApp v3b e schemas MVP sem consumidores foram removidos. Handoff permanece no Chatwoot. Schema/ORM histórico e compatibilidade operacional permanecem; nenhuma migration destrutiva foi adicionada. Inventário, limites e procedimento de backup → [relatório de remoção](../../LEGACY_REMOVAL_REPORT.md).

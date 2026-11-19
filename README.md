@@ -82,7 +82,7 @@ Diagrama de integrações, não de uma única transação:
 
 ## Segurança e limites conhecidos
 
-- CRUD `/agentes`, `/sessoes` e `/atendentes` **sem autenticação de operador no app**, mas bloqueado pelo Nginx desta base F0. Não publicar `app:5000` nem criar proxy alternativo que contorne esse bloqueio; isso não é RBAC.
+- CRUD `/agentes` e `/sessoes` **sem autenticação de operador no app**, mas bloqueado pelo Nginx desta base F0. Não publicar `app:5000` nem criar proxy alternativo que contorne esse bloqueio; isso não é RBAC.
 - `PROVIDER_WEBHOOK_AUTH_MODE=provisioning` é bootstrap, não modo público seguro. Ingress fechado até contratos verificados e auth `enforced`.
 - App não publica porta `5000` no host. Diagnóstico interno não é API pública.
 - Crash/rollback pós-LLM pode perder ledger no fluxo não agendado, inclusive outbox; plano pós-F0 aprovado prevê scheduler antes de tráfego comercial, ainda sem ativação.
@@ -228,3 +228,7 @@ Copyright 2026 Ian Alves Sousa. Distribuído sob a [Apache License 2.0](LICENSE)
 ## Contribuições
 
 Issues e pull requests são bem-vindos. Não inclua segredos, números reais de WhatsApp ou dados de conversas em issues, testes ou exemplos.
+
+### Remoção de superfície legada — 2026-11-19
+
+CRUD de cadastro v3b, armazenamento JSON, notificação WhatsApp v3b e schemas MVP sem consumidores foram removidos. Handoff permanece no Chatwoot. Schema/ORM histórico e compatibilidade operacional permanecem; nenhuma migration destrutiva foi adicionada. Inventário, limites e procedimento de backup → [relatório de remoção](LEGACY_REMOVAL_REPORT.md).
