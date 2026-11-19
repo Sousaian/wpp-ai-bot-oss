@@ -1,0 +1,7 @@
+WPP AI Bot
+Copyright 2026 Ian Alves Sousa
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+It integrates with third-party services and software (Evolution API, Chatwoot,
+OpenRouter, MySQL, Redis, Nginx and others), which are distributed under their
+own licenses and terms and are not covered by this license.

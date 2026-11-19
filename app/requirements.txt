@@ -1,0 +1,3 @@
+# Compatibility alias; requirements.lock is the only install contract.
+--require-hashes
+-r requirements.lock

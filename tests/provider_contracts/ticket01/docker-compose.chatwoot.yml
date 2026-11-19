@@ -1,0 +1,42 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg15
+    environment:
+      POSTGRES_USER: ticket01
+      POSTGRES_PASSWORD: ${TICKET01_POSTGRES_PASSWORD:?generated fixture password required}
+      POSTGRES_DB: ticket01_chatwoot
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ticket01 -d ticket01_chatwoot"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    tmpfs:
+      - /var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    tmpfs:
+      - /data
+
+  chatwoot:
+    image: chatwoot/chatwoot:v4.17.1@sha256:18f280a63070073c7588164eed31303cc788123d899733e54aeec4c39d1d8dd9
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    environment:
+      RAILS_ENV: production
+      SECRET_KEY_BASE: ${TICKET01_SECRET_KEY_BASE:?generated fixture secret required}
+      DATABASE_URL: postgresql://ticket01:${TICKET01_POSTGRES_PASSWORD}@postgres/ticket01_chatwoot
+      REDIS_URL: redis://redis:6379
+      FRONTEND_URL: http://chatwoot:3000
+      ENABLE_ACCOUNT_SIGNUP: "false"
+      RAILS_LOG_TO_STDOUT: "true"
+      LOG_LEVEL: warn
+      INSTALLATION_ENV: docker
+      TICKET01_USER_PASSWORD: ${TICKET01_USER_PASSWORD:?generated fixture password required}
+    command: ["bundle", "exec", "rails", "s", "-p", "3000", "-b", "0.0.0.0"]
+    volumes:
+      - ./chatwoot_seed.rb:/contract/chatwoot_seed.rb:ro
+

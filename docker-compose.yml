@@ -1,0 +1,384 @@
+name: ${COMPOSE_PROJECT_NAME:?COMPOSE_PROJECT_NAME_required}
+
+# Project-scoped tag: a build in another stack/worktree never replaces this one.
+x-python-image: &python-image ${COMPOSE_PROJECT_NAME:?COMPOSE_PROJECT_NAME_required}-app:${DELIVERY_WORKER_CODE_VERSION:?DELIVERY_WORKER_CODE_VERSION_required}
+
+x-chatwoot-environment: &chatwoot-environment
+  RAILS_ENV: production
+  SECRET_KEY_BASE: ${CHATWOOT_SECRET_KEY}
+  DATABASE_URL: postgresql://chatwoot:${CHATWOOT_DB_PASSWORD}@chatwoot-postgres/chatwoot_production
+  REDIS_URL: redis://chatwoot-redis:6379
+  FRONTEND_URL: ${CHATWOOT_FRONTEND_URL}
+  MAILER_SENDER_EMAIL: ${CHATWOOT_MAILER_EMAIL}
+  SMTP_ADDRESS: ${SMTP_ADDRESS}
+  SMTP_PORT: ${SMTP_PORT}
+  SMTP_USERNAME: ${SMTP_USERNAME}
+  SMTP_PASSWORD: ${SMTP_PASSWORD}
+  SMTP_AUTHENTICATION: plain
+  SMTP_ENABLE_STARTTLS_AUTO: "true"
+  SAFE_FETCH_ALLOW_PRIVATE_NETWORK: ${CHATWOOT_SAFE_FETCH_ALLOW_PRIVATE_NETWORK:-false}
+
+services:
+
+  # ─── FASTAPI APP ──────────────────────────────────────────────────
+  app:
+    image: *python-image
+    pull_policy: never
+    build:
+      context: ./app
+      args:
+        DELIVERY_WORKER_CODE_VERSION: ${DELIVERY_WORKER_CODE_VERSION:?DELIVERY_WORKER_CODE_VERSION_required}
+    environment:
+      WPP_REQUIRE_IMAGE_VERSION: "true"
+    stop_grace_period: 10s
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      db-migrate:
+        condition: service_completed_successfully
+      evolution:
+        condition: service_started
+    expose:
+      - "5000"
+    volumes:
+      - app_logs:/app/logs
+    networks:
+      - wpp-net
+    env_file:
+      - .env
+
+  # Durable dispatcher is deployed before cutover but claims nothing while
+  # DELIVERY_DISPATCH_ENABLED=false or DB runtime ownership remains direct.
+  delivery-worker:
+    image: *python-image
+    pull_policy: never
+    environment:
+      WPP_REQUIRE_IMAGE_VERSION: "true"
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      db-migrate:
+        condition: service_completed_successfully
+      evolution:
+        condition: service_started
+      chatwoot:
+        condition: service_started
+    volumes:
+      - app_logs:/app/logs
+    networks:
+      - wpp-net
+    env_file:
+      - .env
+    command: ["python", "-m", "src.delivery_worker"]
+    stop_grace_period: 40s
+    healthcheck:
+      test: ["CMD", "python", "-m", "src.delivery_cli", "health"]
+      interval: 15s
+      timeout: 5s
+      retries: 4
+      start_period: 20s
+
+  # T08-3: inbox turn worker. Profile-gated (never started by default); exits
+  # 0 without claims while INBOX_TURN_PROCESSOR_ENABLED=false and refuses to
+  # start without the scheduler gate, both epochs and a matching DB schema.
+  turn-worker:
+    image: *python-image
+    pull_policy: never
+    environment:
+      WPP_REQUIRE_IMAGE_VERSION: "true"
+    profiles: ["inbox"]
+    restart: on-failure
+    depends_on:
+      db:
+        condition: service_healthy
+      db-migrate:
+        condition: service_completed_successfully
+    volumes:
+      - app_logs:/app/logs
+    networks:
+      - wpp-net
+    env_file:
+      - .env
+    command: ["python", "-m", "src.turn_worker"]
+    stop_grace_period: 40s
+    healthcheck:
+      test: ["CMD", "python", "-m", "src.turn_worker", "health"]
+      interval: 15s
+      timeout: 5s
+      retries: 4
+      start_period: 20s
+
+  delivery-ops:
+    image: *python-image
+    pull_policy: never
+    environment:
+      WPP_REQUIRE_IMAGE_VERSION: "true"
+    profiles: ["ops"]
+    depends_on:
+      db:
+        condition: service_healthy
+      db-migrate:
+        condition: service_completed_successfully
+    volumes:
+      - app_logs:/app/logs
+    networks:
+      - wpp-net
+    env_file:
+      - .env
+    command: ["python", "-m", "src.delivery_cli", "list"]
+
+  # Explicit rollout tool for provider callback authentication. Run through
+  # scripts/provision_provider_auth.sh so provider state is installed and
+  # verified before mandatory route authentication is enabled.
+  provider-auth-bootstrap:
+    image: *python-image
+    pull_policy: never
+    environment:
+      WPP_REQUIRE_IMAGE_VERSION: "true"
+    profiles: ["ops"]
+    depends_on:
+      db:
+        condition: service_healthy
+      db-migrate:
+        condition: service_completed_successfully
+      evolution:
+        condition: service_started
+      chatwoot:
+        condition: service_started
+    volumes:
+      # Directory mount lets the bootstrap replace .env atomically; an
+      # individual bind-mounted file cannot be renamed on Linux.
+      - ./:/workspace
+      - app_logs:/app/logs
+    networks:
+      - wpp-net
+    env_file:
+      - .env
+    command: ["python", "-m", "src.provider_auth_cli", "check"]
+
+  # Internal recurring producer for the snapshot served by
+  # /health/provider-auth. It performs active probes only inside this dedicated
+  # container and keeps public health requests local and bounded.
+  provider-auth-monitor:
+    image: *python-image
+    pull_policy: never
+    environment:
+      WPP_REQUIRE_IMAGE_VERSION: "true"
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_started
+      db-migrate:
+        condition: service_completed_successfully
+      chatwoot:
+        condition: service_started
+    volumes:
+      - app_logs:/app/logs
+    networks:
+      - wpp-net
+    env_file:
+      - .env
+    command: ["python", "-m", "src.provider_auth_cli", "monitor"]
+    stop_grace_period: 20s
+    healthcheck:
+      test: ["CMD", "python", "-m", "src.provider_auth_cli", "snapshot-health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  # ─── MYSQL ───────────────────────────────────────────────────────
+  db:
+    image: mysql:8.0@sha256:62fb722c78b24245ddff1796a0fcee4a49cc5b87e0aaaf20c92d1da9e0a2497b
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    networks:
+      - wpp-net
+    expose:
+      - "3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  db-migrate:
+    image: mysql:8.0@sha256:62fb722c78b24245ddff1796a0fcee4a49cc5b87e0aaaf20c92d1da9e0a2497b
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+    volumes:
+      - ./db/init.sql:/migrations/v4.1.sql:ro
+    networks:
+      - wpp-net
+    command:
+      - /bin/sh
+      - -c
+      - >-
+        MYSQL_PWD="$${MYSQL_ROOT_PASSWORD}"
+        mysql --protocol=tcp -h db -u root "$${MYSQL_DATABASE}"
+        < /migrations/v4.1.sql
+
+  # ─── EVOLUTION API ────────────────────────────────────────────────
+  evolution:
+    image: evoapicloud/evolution-api:v2.3.7@sha256:966625532d9076a2381e973a271307d107e6f070450de3abeeea8bd18be07252
+    restart: unless-stopped
+    depends_on:
+      - redis
+      - evolution-postgres
+    expose:
+      - "8080"
+    volumes:
+      - evolution_instances:/evolution/instances
+    networks:
+      - wpp-net
+    env_file:
+      - .env
+    environment:
+      # WEBHOOKS logs include the complete provider payload. Keep this override
+      # payload-safe even if an older .env still enables that category.
+      LOG_LEVEL: ${EVOLUTION_LOG_LEVEL:-ERROR,WARN,INFO}
+
+  # ─── EVOLUTION FRONTEND ───────────────────────────────────────────
+  frontend:
+    image: evoapicloud/evolution-manager:latest@sha256:31cd783d02657dc47f5fd4f6da63b354decccb157349d7649a091c74b7d5b70a
+    restart: unless-stopped
+    expose:
+      - "80"
+    volumes:
+      - ./frontend-nginx.conf:/etc/nginx/conf.d/nginx.conf:ro
+    networks:
+      - wpp-net
+
+  # ─── REDIS ───────────────────────────────────────────────────────
+  redis:
+    image: redis:latest@sha256:13ad9044b4b2fd2abe4c5aad8c384b0504a71006fa33f023fc68998453a2eeca
+    restart: unless-stopped
+    command: redis-server --port 6379 --appendonly yes
+    volumes:
+      - evolution_redis:/data
+    networks:
+      - wpp-net
+    expose:
+      - "6379"
+
+  # ─── POSTGRES (Evolution API) ─────────────────────────────────────
+  evolution-postgres:
+    image: postgres:15@sha256:b9a6ab4a977ee1b4ef2aa7f49dcf962f827ed3bcbb2eea66288ab2134ff2e2b2
+    restart: unless-stopped
+    env_file:
+      - .env
+    command:
+      - postgres
+      - -c
+      - max_connections=1000
+    environment:
+      POSTGRES_DB: ${POSTGRES_DATABASE}
+      POSTGRES_USER: ${POSTGRES_USERNAME}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - wpp-net
+    expose:
+      - "5432"
+
+  # ─── CHATWOOT ────────────────────────────────────────────────────
+  chatwoot-redis:
+    image: redis:7-alpine@sha256:8be847644e195abc4c10c8d9936cfa45332eccc6b714fa7b186ff43f1f4d5579
+    networks:
+      - wpp-net
+    restart: unless-stopped
+
+  
+  chatwoot-postgres:
+    image: pgvector/pgvector:pg15@sha256:9a169499888c9d75ad14d0401be64839d2c325f32e399098261589faff93d65c
+    environment:
+      POSTGRES_USER: chatwoot
+      POSTGRES_PASSWORD: ${CHATWOOT_DB_PASSWORD}
+      POSTGRES_DB: chatwoot_production
+    volumes:
+      - chatwoot_pg_data:/var/lib/postgresql/data
+    networks:
+      - wpp-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U chatwoot -d chatwoot_production"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  chatwoot:
+    image: chatwoot/chatwoot:v4.17.1@sha256:18f280a63070073c7588164eed31303cc788123d899733e54aeec4c39d1d8dd9
+    command: ["bundle", "exec", "rails", "s", "-p", "3000", "-b", "0.0.0.0"]
+    depends_on:
+      chatwoot-postgres:
+        condition: service_healthy
+      chatwoot-redis:
+        condition: service_started
+    environment: *chatwoot-environment
+    volumes:
+      - ./chatwoot/config/initializers/wpp_phone_log_redaction.rb:/app/config/initializers/wpp_phone_log_redaction.rb:ro
+    networks:
+      - wpp-net
+    restart: unless-stopped
+
+  chatwoot-sidekiq:
+    image: chatwoot/chatwoot:v4.17.1@sha256:18f280a63070073c7588164eed31303cc788123d899733e54aeec4c39d1d8dd9
+    command: ["bundle", "exec", "sidekiq", "-C", "config/sidekiq.yml"]
+    depends_on:
+      chatwoot-postgres:
+        condition: service_healthy
+      chatwoot-redis:
+        condition: service_started
+    environment: *chatwoot-environment
+    volumes:
+      - ./chatwoot/config/initializers/wpp_phone_log_redaction.rb:/app/config/initializers/wpp_phone_log_redaction.rb:ro
+    networks:
+      - wpp-net
+    restart: unless-stopped
+
+  # ─── NGINX ───────────────────────────────────────────────────────
+  nginx:
+    image: nginx:alpine@sha256:2db7d28517d1fba17c2da3210395f7be11a11b419246ad0da2edf782af72f367
+    restart: unless-stopped
+    depends_on:
+      - app
+      - evolution
+      - frontend
+      - chatwoot
+    ports:
+      - "${NGINX_BIND_ADDRESS:-127.0.0.1}:${NGINX_HTTP_PORT:-80}:80"
+      - "${NGINX_BIND_ADDRESS:-127.0.0.1}:${NGINX_HTTPS_PORT:-443}:443"
+    volumes:
+      - ${NGINX_CONF_PATH:-./nginx/nginx.conf}:/etc/nginx/nginx.conf:ro
+      - ./nginx/certs:/etc/nginx/certs:ro
+    networks:
+      - wpp-net
+
+volumes:
+  mysql_data:
+  app_logs:
+  evolution_instances:
+  evolution_redis:
+  postgres_data:
+  chatwoot_pg_data:
+
+networks:
+  wpp-net:
+    driver: bridge

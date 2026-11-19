@@ -1,0 +1,233 @@
+name: ${COMPOSE_PROJECT_NAME:?COMPOSE_PROJECT_NAME_required}
+x-validation-image: &validation-image ${COMPOSE_PROJECT_NAME:?COMPOSE_PROJECT_NAME_required}-app:${DELIVERY_WORKER_CODE_VERSION:?DELIVERY_WORKER_CODE_VERSION_required}
+x-validation-build: &validation-build
+  context: ./app
+  args:
+    DELIVERY_WORKER_CODE_VERSION: ${DELIVERY_WORKER_CODE_VERSION:?DELIVERY_WORKER_CODE_VERSION_required}
+
+services:
+  db:
+    image: mysql:8.0
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+    volumes:
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD}"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  evolution-postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: evolution
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d evolution"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  evolution:
+    image: evoapicloud/evolution-api:v2.3.7@sha256:966625532d9076a2381e973a271307d107e6f070450de3abeeea8bd18be07252
+    depends_on:
+      evolution-postgres:
+        condition: service_healthy
+    environment:
+      SERVER_TYPE: http
+      SERVER_PORT: 8080
+      SERVER_URL: http://evolution:8080
+      DATABASE_PROVIDER: postgresql
+      DATABASE_CONNECTION_URI: postgresql://postgres:${POSTGRES_PASSWORD}@evolution-postgres:5432/evolution?schema=evolution_api
+      DATABASE_CONNECTION_CLIENT_NAME: provider_auth_validation
+      DATABASE_SAVE_DATA_INSTANCE: "true"
+      CACHE_REDIS_ENABLED: "false"
+      AUTHENTICATION_API_KEY: ${EVOLUTION_API_KEY}
+      AUTHENTICATION_EXPOSE_IN_FETCH_INSTANCES: "true"
+      LOG_LEVEL: ERROR,WARN
+
+  chatwoot-postgres:
+    image: pgvector/pgvector:pg15
+    environment:
+      POSTGRES_DB: chatwoot
+      POSTGRES_USER: chatwoot
+      POSTGRES_PASSWORD: ${CHATWOOT_DB_PASSWORD}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U chatwoot -d chatwoot"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  chatwoot-redis:
+    image: redis:7-alpine
+
+  chatwoot-prepare:
+    image: chatwoot/chatwoot:v4.17.1@sha256:18f280a63070073c7588164eed31303cc788123d899733e54aeec4c39d1d8dd9
+    depends_on:
+      chatwoot-postgres:
+        condition: service_healthy
+      chatwoot-redis:
+        condition: service_started
+    environment: &chatwoot-validation-environment
+      RAILS_ENV: production
+      SECRET_KEY_BASE: ${CHATWOOT_SECRET_KEY}
+      DATABASE_URL: postgresql://chatwoot:${CHATWOOT_DB_PASSWORD}@chatwoot-postgres/chatwoot
+      REDIS_URL: redis://chatwoot-redis:6379
+      FRONTEND_URL: http://chatwoot:3000
+      ENABLE_ACCOUNT_SIGNUP: "false"
+      SAFE_FETCH_ALLOW_PRIVATE_NETWORK: "true"
+      PROVIDER_AUTH_VALIDATION_UID: ${PROVIDER_AUTH_VALIDATION_UID}
+      PROVIDER_AUTH_VALIDATION_GID: ${PROVIDER_AUTH_VALIDATION_GID}
+    command: ["bundle", "exec", "rails", "db:chatwoot_prepare"]
+
+  chatwoot:
+    image: chatwoot/chatwoot:v4.17.1@sha256:18f280a63070073c7588164eed31303cc788123d899733e54aeec4c39d1d8dd9
+    depends_on:
+      chatwoot-prepare:
+        condition: service_completed_successfully
+    environment: *chatwoot-validation-environment
+    volumes:
+      - ${PROVIDER_AUTH_VALIDATION_DIR}:/validation
+      - ./chatwoot/config/initializers/wpp_phone_log_redaction.rb:/app/config/initializers/wpp_phone_log_redaction.rb:ro
+    command: ["bundle", "exec", "rails", "s", "-p", "3000", "-b", "0.0.0.0"]
+
+  chatwoot-sidekiq:
+    image: chatwoot/chatwoot:v4.17.1@sha256:18f280a63070073c7588164eed31303cc788123d899733e54aeec4c39d1d8dd9
+    depends_on:
+      chatwoot-prepare:
+        condition: service_completed_successfully
+      chatwoot-redis:
+        condition: service_started
+    environment: *chatwoot-validation-environment
+    volumes:
+      - ./chatwoot/config/initializers/wpp_phone_log_redaction.rb:/app/config/initializers/wpp_phone_log_redaction.rb:ro
+    command: ["bundle", "exec", "sidekiq", "-C", "config/sidekiq.yml"]
+
+  app:
+    image: *validation-image
+    build: *validation-build
+    environment:
+      WPP_REQUIRE_IMAGE_VERSION: "true"
+      WPP_DEV_BIND_CODE: "true"
+    depends_on:
+      db:
+        condition: service_healthy
+      evolution:
+        condition: service_started
+      chatwoot:
+        condition: service_started
+    env_file:
+      - ${PROVIDER_AUTH_VALIDATION_ENV}
+    volumes:
+      - ./app:/app
+      - provider_auth_snapshot:/app/logs
+    networks:
+      default:
+        aliases:
+          - app-rotated
+
+  synthetic-evolution:
+    image: *validation-image
+    build: *validation-build
+    command:
+      - python
+      - -c
+      - |
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", "0"))
+                self.rfile.read(length)
+                self.send_response(503)
+                self.end_headers()
+            def log_message(self, format, *args):
+                print("synthetic evolution outage", flush=True)
+        ThreadingHTTPServer(("0.0.0.0", 8080), Handler).serve_forever()
+
+  delivery-worker:
+    image: *validation-image
+    build: *validation-build
+    depends_on:
+      db:
+        condition: service_healthy
+      chatwoot:
+        condition: service_started
+      synthetic-evolution:
+        condition: service_started
+    env_file:
+      - ${PROVIDER_AUTH_VALIDATION_ENV}
+    environment:
+      WPP_REQUIRE_IMAGE_VERSION: "true"
+      WPP_DEV_BIND_CODE: "true"
+      EVOLUTION_API_URL: http://synthetic-evolution:8080
+      DELIVERY_WORKER_HEALTH_PATH: /app/logs/delivery-worker-health.json
+    volumes:
+      - ./app:/app
+      - provider_auth_snapshot:/app/logs
+    command: ["python", "-m", "src.delivery_worker"]
+    stop_grace_period: 10s
+
+  nginx:
+    image: nginx:1.27-alpine
+    depends_on:
+      app:
+        condition: service_started
+    volumes:
+      - ./nginx/nginx.dev.conf:/etc/nginx/nginx.conf:ro
+
+  provider-auth-bootstrap:
+    profiles: ["ops"]
+    image: *validation-image
+    build: *validation-build
+    environment:
+      WPP_REQUIRE_IMAGE_VERSION: "true"
+      WPP_DEV_BIND_CODE: "true"
+    depends_on:
+      db:
+        condition: service_healthy
+      evolution:
+        condition: service_started
+      chatwoot:
+        condition: service_started
+    env_file:
+      - ${PROVIDER_AUTH_VALIDATION_ENV}
+    volumes:
+      - ./app:/app
+      - ${PROVIDER_AUTH_VALIDATION_DIR}:/workspace
+      - provider_auth_snapshot:/app/logs
+    command: ["python", "-m", "src.provider_auth_cli", "check"]
+
+  provider-auth-monitor:
+    image: *validation-image
+    build: *validation-build
+    environment:
+      WPP_REQUIRE_IMAGE_VERSION: "true"
+      WPP_DEV_BIND_CODE: "true"
+    depends_on:
+      app:
+        condition: service_started
+      db:
+        condition: service_healthy
+      chatwoot:
+        condition: service_started
+    env_file:
+      - ${PROVIDER_AUTH_VALIDATION_ENV}
+    volumes:
+      - ./app:/app
+      - provider_auth_snapshot:/app/logs
+    command: ["python", "-m", "src.provider_auth_cli", "monitor"]
+    stop_grace_period: 10s
+    healthcheck:
+      test: ["CMD", "python", "-m", "src.provider_auth_cli", "snapshot-health"]
+      interval: 3s
+      timeout: 2s
+      retries: 3
+      start_period: 3s
+
+volumes:
+  provider_auth_snapshot:

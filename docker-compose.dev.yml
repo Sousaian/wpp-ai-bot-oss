@@ -1,0 +1,32 @@
+# Explicit local-development override; release always runs image code.
+services:
+  app:
+    environment:
+      WPP_DEV_BIND_CODE: "true"
+    volumes:
+      - ./app:/app
+  delivery-worker:
+    environment:
+      WPP_DEV_BIND_CODE: "true"
+    volumes:
+      - ./app:/app
+  turn-worker:
+    environment:
+      WPP_DEV_BIND_CODE: "true"
+    volumes:
+      - ./app:/app
+  delivery-ops:
+    environment:
+      WPP_DEV_BIND_CODE: "true"
+    volumes:
+      - ./app:/app
+  provider-auth-bootstrap:
+    environment:
+      WPP_DEV_BIND_CODE: "true"
+    volumes:
+      - ./app:/app
+  provider-auth-monitor:
+    environment:
+      WPP_DEV_BIND_CODE: "true"
+    volumes:
+      - ./app:/app
