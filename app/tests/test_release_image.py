@@ -61,8 +61,8 @@ class ReleaseBuildScriptTests(unittest.TestCase):
         root = Path(os.environ.get("WPP_REPO_ROOT", Path(__file__).resolve().parents[2]))
         count = sum(validate_script_builds(path, path.read_text()) for path in (root / "scripts").iterdir()
                     if path.suffix in (".py", ".sh"))
-        self.assertEqual(count, 17)  # 15 shell + Nginx proof + certified release builder.
-        print("R5_BUILD_ARG_MATRIX PASS commands=17")
+        self.assertEqual(count, 18)  # 16 shell (incl. CI suite) + Nginx proof + certified release builder.
+        print("R5_BUILD_ARG_MATRIX PASS commands=18")
 
     def test_each_shell_build_arg_removal_is_detected(self) -> None:
         root = Path(os.environ.get("WPP_REPO_ROOT", Path(__file__).resolve().parents[2]))
@@ -77,7 +77,7 @@ class ReleaseBuildScriptTests(unittest.TestCase):
                 validate_script_builds(path, mutated)
             count += 1
             print("R3_BUILD_ARG_MUTATION PASS script=" + path.name)
-        self.assertEqual(count, 15)
+        self.assertEqual(count, 16)
 
 
 def validate_compose_builds(source: str) -> int:

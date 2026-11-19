@@ -5,6 +5,8 @@
 set -Eeuo pipefail
 
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "${repo}/scripts/test_image_version.sh"
+build_code_version="$(image_test_build_version "${repo}")"
 label="${CI_SUITE_LABEL:-local}-$$"
 logs="${CI_SUITE_LOG_DIR:-$repo/.test-runs/ci}"
 mkdir -p "$logs"
@@ -18,7 +20,7 @@ cleanup() {
 trap cleanup EXIT
 
 echo "::group::Build app image"
-docker build --build-arg DELIVERY_WORKER_CODE_VERSION=outbox-v1 -t "$img" "$repo/app"
+docker build --build-arg "DELIVERY_WORKER_CODE_VERSION=${build_code_version}" -t "$img" "$repo/app"
 echo "::endgroup::"
 
 echo "::group::Start disposable MySQL"
