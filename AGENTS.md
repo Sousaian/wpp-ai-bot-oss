@@ -182,7 +182,6 @@ Chatwoot → `routers/chatwoot.py` → auth conforme modo → `services/chatwoot
 | `scripts/` | Matrizes, mutações, probes e provisionamento |
 | `nginx/`, `chatwoot/` | Borda, privacidade de logs e checks Rails |
 | `tests/provider_contracts/` | Provas auxiliares dos contratos Evolution/Chatwoot |
-| `PRE_MUDANCA_CHECKLIST.txt` | Checklist histórico de transporte; não autoriza limpeza ou start |
 
 Documentação de mapeamento explica o código, não substitui §10, §16.1 ou os runbooks. Toda mudança de contrato deve atualizar documentação/testes pertinentes no mesmo changeset.
 
