@@ -6,7 +6,7 @@ Snapshot de código em **2026-11-09**: `main` = `dev` = `5908a94`, F0 integrado 
 
 Plataforma open source (Apache-2.0) e self-hosted de atendimento por texto no WhatsApp, contextualizado por agente, com handoff para Chatwoot e rastreabilidade de uso/custo. Uma instalação pode ter vários números; instância Evolution identifica agente. Hoje cada instalação é configurada por um operador.
 
-Direção planejada: espaços de trabalho e usuários autenticados numa mesma instalação, MFA/RBAC, auditoria e configuração de providers por empresa. Isso exige schema, repositórios, API e migração próprios; não existe só porque agentes atuais usam IDs distintos.
+Implementado: login da API para empresa única (usuários, sessão no servidor, tokens de serviço, papéis fixos `admin`/`operador`/`leitura`, TOTP obrigatório para admin, auditoria). Direção planejada: espaços de trabalho numa mesma instalação, papéis por empresa e configuração de providers por empresa. Isso exige schema, repositórios, API e migração próprios; não existe só porque agentes atuais usam IDs distintos.
 
 Não inclui sistema de billing nem painel próprio já entregue. Painel Evolution e Chatwoot são produtos externos; um painel próprio é outra entrega.
 

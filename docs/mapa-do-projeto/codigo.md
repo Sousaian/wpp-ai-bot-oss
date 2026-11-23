@@ -14,14 +14,16 @@ Base `main` = `dev` = `5908a94`, snapshot documental de 2026-11-09: F0 integrado
 | [delivery_cli.py](../../app/src/delivery_cli.py) | Delivery, cutover/rollback, scheduler-state, resolução e quarentena |
 | [agent_scheduler_cli.py](../../app/src/agent_scheduler_cli.py) | Subcomandos `agent-scheduler` na CLI delivery, não serviço público |
 | [provider_auth_cli.py](../../app/src/provider_auth_cli.py) | `prepare`, `verify`, `enable`, `check`, `monitor`, `snapshot-health` |
+| [auth_cli.py](../../app/src/auth_cli.py) | Usuários, bootstrap do primeiro admin, resets e tokens de serviço da API (container-only) |
 
 | Router | Superfície |
 | --- | --- |
 | [agentes.py](../../app/src/routers/agentes.py) | `/agentes`, CRUD/allowlist e consumo por agente |
 | [sessoes.py](../../app/src/routers/sessoes.py) | Leitura/histórico, transferir/retomar, delete fenced |
 | [chatwoot.py](../../app/src/routers/chatwoot.py) | Assinatura/parse e delegação de `/chatwoot/webhook` |
+| [auth.py](../../app/src/routers/auth.py) | `/auth`: login, TOTP, ativação/reset por token, logout, me |
 
-`Depends(get_db)` não é autenticação. CRUD continua sem auth de operador; Nginx F0 o bloqueia, acesso direto ao app pela rede Docker permanece privilegiado. Schemas ativos estão nos próprios routers.
+`Depends(get_db)` não é autenticação. Autenticação/autorização vem de `services/auth/contexto.py` (`autenticar`, transação própria) e `services/auth/rbac.py` (`exigir`, guard por router); cada rota de `/agentes`/`/sessoes` declara uma permissão. Nginx F0 continua bloqueando o CRUD; acesso ao container permanece privilegiado. Schemas ativos estão nos próprios routers.
 
 ## Negócio e providers
 
@@ -34,6 +36,7 @@ Base `main` = `dev` = `5908a94`, snapshot documental de 2026-11-09: F0 integrado
 | [services/evolution_client.py](../../app/src/services/evolution_client.py) | HTTP multi-instância, mensagens/presença |
 | [services/chatwoot_client.py](../../app/src/services/chatwoot_client.py) | Contatos, conversas, mensagens e contrato provider |
 | [services/webhook_auth.py](../../app/src/services/webhook_auth.py) | Bearer Evolution e criptografia dos callbacks Chatwoot |
+| [services/auth/](../../app/src/services/auth/) | `contexto` (credencial/CSRF), `rbac` (papéis/permissões), `senha` (argon2id+pepper), `sessao` (login/TOTP/tokens), `totp`, `limites`, `auditoria`, `administracao` (CLI) |
 | [services/provider_auth_bootstrap.py](../../app/src/services/provider_auth_bootstrap.py) | Instalação/auditoria/probes e snapshot provider |
 | [services/handoff_manager.py](../../app/src/services/handoff_manager.py) | Handoff compatível direct/outbox não agendado |
 | [services/delivery_adapters.py](../../app/src/services/delivery_adapters.py) | Decoders/payloads e operações remotas versionadas |

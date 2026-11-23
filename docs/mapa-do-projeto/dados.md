@@ -45,6 +45,18 @@ Receipt não armazena payload bruto como fonte de decisão. `receipt_disposition
 
 Tabelas presentes não autorizam intake/dispatch. Schema esperado é `3`, validado pelo código; flags e autoridade DB são gates separados.
 
+## Autenticação da API
+
+| Tabela | Fato persistido |
+| --- | --- |
+| `auth_usuarios` | E-mail canônico único, papel fixo, status, hash argon2id+pepper, TOTP cifrado e contadores de bloqueio |
+| `auth_sessoes` | Hash da sessão opaca/desafio TOTP, estágio, hash CSRF, validade e revogação |
+| `auth_tokens_servico` | Hash do token Bearer, papel não-admin, expiração e revogação |
+| `auth_tokens_uso_unico` | Hash de ativação/reset entregue fora do sistema, validade e uso único |
+| `auth_auditoria` | Eventos allowlisted de login, MFA, negação, CLI e mutações de agente/sessão, com dados mascarados |
+
+Folhas aditivas, sem FK para o domínio; usuários nunca são apagados. Não alteram `schema_version` do scheduler. Sem `empresa_id`: escopo por empresa é coluna futura aditiva.
+
 ## Relações centrais
 
 ```mermaid

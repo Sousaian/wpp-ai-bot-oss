@@ -33,7 +33,7 @@ Dependências lógicas, não garantia de arestas habilitadas nem inventário de 
 
 - MySQL é domínio do bot; Postgres/Redis dos providers não substituem repositórios.
 - Rede principal é `<COMPOSE_PROJECT_NAME>_wpp-net`; projeto obrigatório identifica rede/volumes, sem nomes globais de containers. App não publica porta host.
-- Só Nginx publica `80/443`, bind default `127.0.0.1`. Borda app permite somente `/`, `/health`, `/webhook` e `/chatwoot/webhook`, com métodos restritos; demais paths retornam 404 sem upstream. Isso não adiciona login ao CRUD interno.
+- Só Nginx publica `80/443`, bind default `127.0.0.1`. Borda app permite somente `/`, `/health`, `/webhook` e `/chatwoot/webhook`, com métodos restritos; demais paths retornam 404 sem upstream. Login do CRUD é feito no app (§10.16 do AGENTS), não na borda; `/auth` também fica fora da allowlist.
 - Integrações internas usam `app:5000`, `evolution:8080`, `chatwoot:3000`, `db:3306`, não `localhost`.
 - Callback privado `http://app:5000` exige `SAFE_FETCH_ALLOW_PRIVATE_NETWORK` no Chatwoot; isso amplia confiança global de SafeFetch.
 

@@ -3,6 +3,7 @@
 > **Revisão documental:** 2026-11-09 — runtime v4.1, outbox, scheduler e F0 implementados; ativação operacional separada.
 > **Base desta conciliação:** `main` = `dev` = `5908a94` (PR #14; promoção de main por fast-forward; certificação integrada p55). Esta edição documental não é deploy nem certifica seu futuro SHA de merge.
 > **Repositório:** `Sousaian/wpp-ai-bot-oss` (público, Apache-2.0). Regras de fluxo, higiene pública e testes em [§0](#0-repositório-open-source--regras-de-trabalho) e [CONTRIBUTING.md](CONTRIBUTING.md). Histórico anterior a 2026-11-19 (PRs #1–#17, branch `dev`) existe só no repositório privado de origem e não é referência deste repo.
+> **Autenticação da API (2026-11-23):** login de operador por papéis fixos, empresa única, só API (branches `feat/auth-foundation` e `feat/auth-rbac-mfa`; §5.8, §7, §9.3, §10.16). Nginx não expõe `/auth`; exposição é decisão separada.
 > **Regra:** este arquivo concentra instruções e contratos para agentes. Código/SQL descrevem implementação; estado operacional exige verificação própria. Merge não equivale a deploy.
 
 ## 0. Repositório open source — regras de trabalho
@@ -15,7 +16,7 @@ Vigência: 2026-11-19. Valem para pessoas e agentes (Traycer, Codex, Claude e ou
 4. **Licença:** Apache-2.0. Mantenha `LICENSE` e `NOTICE`. Nova dependência exige licença compatível com redistribuição Apache-2.0 (permissivas preferidas); dependência copyleft forte embutida no processo exige aprovação explícita. Serviços externos (Evolution, Chatwoot, MySQL) continuam sob as próprias licenças.
 5. **Posicionamento:** plataforma open source e self-hosted. Não reintroduzir linguagem de produto B2B/SaaS comercial nem roadmap comercial privado na documentação pública.
 6. **Arquitetura e compatibilidade:** persistir sessões em MySQL; atribuição e disponibilidade de atendentes ficam no Chatwoot. Preservar contratos dos modos direct, outbox e scheduler. Não retirar tabelas, campos ou valores de enum de compatibilidade sem migração explícita e auditada, com backup, restauração testada e validação em MySQL novo e existente. Coordenar SQL, ORM, API e testes conforme §5.6.
-7. **Testes obrigatórios antes de PR:** suíte completa `python -m unittest discover` com MySQL 8.0 descartável em rede interna (credenciais sintéticas), sem falhas. Linha de base atual: **751 testes OK**. Mudança de contrato de documentação atualiza o teste correspondente no mesmo PR. Testes que pulam por falta de MySQL não contam como aprovação.
+7. **Testes obrigatórios antes de PR:** suíte completa `python -m unittest discover` com MySQL 8.0 descartável em rede interna (credenciais sintéticas), sem falhas. Linha de base atual: **799 testes OK**. Mudança de contrato de documentação atualiza o teste correspondente no mesmo PR. Testes que pulam por falta de MySQL não contam como aprovação.
 8. **Planejamento interno** (tickets, specs, revisões e evidências) fica fora do repositório. A documentação pública resume decisões e estado sem depender desses artefatos.
 
 ## 1. Contexto do Projeto
@@ -27,8 +28,8 @@ Objetivo → responder leads no contexto da empresa, preservar histórico, trans
 ### 1.1 Modelo atual e direção de produto
 
 - **Implementado:** uma instalação por cliente; cada número/instância Evolution corresponde a um agente com prompt, modelo, histórico e limite próprios.
-- **Operação atual:** configuração por operador via API/CLI; CRUD sem autenticação de usuário no app. Isolamento por agente não constitui isolamento de empresas autenticadas numa instalação compartilhada.
-- **Direção planejada:** múltiplas empresas por instalação, portal/API autenticada, usuários individuais, MFA, papéis e auditoria. Ainda não há `empresa_id`, usuários ou RBAC no schema atual; não implementá-los por inferência.
+- **Operação atual:** configuração por operador via API/CLI. `/agentes` e `/sessoes` exigem login no app (sessão por cookie ou token de serviço), com papéis fixos `admin`/`operador`/`leitura`, TOTP obrigatório para admin e auditoria (§10.16). Empresa única: isolamento por agente não constitui isolamento de empresas autenticadas numa instalação compartilhada.
+- **Direção planejada:** múltiplas empresas por instalação, portal autenticado, papéis por empresa. Ainda não há `empresa_id` nem escopo de empresa no schema; não implementá-los por inferência. E-mail de usuário já é único globalmente e o schema de auth aceita coluna de empresa aditiva.
 - **Atendimento humano:** Chatwoot; atribuição a atendentes e disponibilidade são responsabilidades dele, não do MySQL do bot.
 - **Comercial:** modelo permitido e soft limit por agente; medição de custo não é módulo de cobrança automática.
 
@@ -44,7 +45,8 @@ Definição e roadmap → [README.md](README.md), [mapa e estado](docs/mapa-do-p
 | Scheduler/turns, geração, typing, handoff e opt-in | Implementados, tickets inbox 01–09 | Flags desligadas; ativação exige epochs, frota compatível e opt-in |
 | Deadline de shutdown do processo | PR #13 em `main` | Não corrige accounting pré-commit do legado |
 | Imagens imutáveis, pins, preflight e allowlist Nginx | F0 integrado em dev via PR #14 e em main por fast-forward, base `5908a94` | Certificação integrada p55 aceita; não presumir deploy/ativação |
-| Portal multi-empresa/MFA/RBAC | Planejamento | Não implementado |
+| Login da API: usuários, sessão, tokens de serviço, RBAC fixo, TOTP admin, auditoria | Implementado (empresa única, só API) | Chaves `AUTH_*` e bootstrap por CLI; Nginx não expõe `/auth` |
+| Portal multi-empresa/papéis por empresa | Planejamento | Não implementado |
 
 Não usar números antigos de testes ou status de versões como prova de execução no checkout atual.
 
@@ -128,6 +130,7 @@ Mapas → [arquitetura](docs/mapa-do-projeto/arquitetura.md), [operação e vers
 | Dados | `database/models.py`, `database/repositories/`, `database/unit_of_work.py` | ORM, acesso MySQL e commit explícito |
 | Controle/health | `provider_auth_cli.py`, `services/provider_auth_bootstrap.py`, `replica_compat.py`, `scheduler_observability.py` | Auth, compatibilidade, snapshots e métricas |
 | Operador | `delivery_cli.py`, `agent_scheduler_cli.py` | Cutover, resolução, enablement e opt-in auditados |
+| Autenticação da API | `routers/auth.py`, `services/auth/`, `repositories/auth_repo.py`, `auth_cli.py` | Login, sessão, CSRF, tokens, RBAC, TOTP, auditoria e CLI de usuários |
 
 Inventário detalhado → [mapa do código](docs/mapa-do-projeto/codigo.md).
 
@@ -168,6 +171,7 @@ Chatwoot → `routers/chatwoot.py` → auth conforme modo → `services/chatwoot
 | `docs/durable-delivery-runbook.md` | Cutover outbox, rollback e limites de entrega |
 | `docs/inbox-scheduler-runbook.md` | Enablement, canary, opt-in, drain, retenção e operação scheduler |
 | `app/src/` | Runtime Python |
+| `app/src/services/auth/` | Senha, sessão, CSRF, tokens, limites, RBAC, TOTP e auditoria da API (§10.16) |
 | `app/tests/` | Testes unitários/contratos/MySQL e fixtures |
 | `db/init.sql` | Schema e migrations aditivas com shape/digest fail-closed |
 | `docker-compose.yml` | Release: código da imagem, isolamento por projeto; executar pode alterar dados |
@@ -179,6 +183,7 @@ Chatwoot → `routers/chatwoot.py` → auth conforme modo → `services/chatwoot
 | `docker-compose.provider-auth-validation.yml` | Stack de prova dos contratos provider; não configuração de produção |
 | `.env.example`, `app/.env.example` | Templates públicos; nunca usar placeholders como segredos reais |
 | `scripts/` | Matrizes, mutações, probes e provisionamento |
+| `scripts/run_auth_schema_mysql_matrix.sh` | Migration auth: MySQL novo, reaplicação, existente com dados e shapes divergentes |
 | `nginx/`, `chatwoot/` | Borda, privacidade de logs e checks Rails |
 | `tests/provider_contracts/` | Provas auxiliares dos contratos Evolution/Chatwoot |
 
@@ -398,6 +403,20 @@ Boundaries: `t083-schema-boundary: replica-heartbeats-created`,
 `…: replica-heartbeats-validated`, `…: schema-version-recorded`. Nada é
 dropado. Retenção: 90 dias por PK, discovery limitada (§10.10).
 
+### 5.8 Autenticação da API — tabelas `auth_*`
+
+Folhas aditivas no fim de `db/init.sql`; nenhuma tabela existente ganha coluna, FK, CHECK ou trigger; `schema_version` do scheduler não muda (workers não as leem). Validação de shape exata (colunas com ordinal/tipo/default/collation/extra, índices, digests de CHECK, FKs com regras, zero trigger) falha fechada com `auth-1 … requires audited repair`, sem reescrita. Matriz: `scripts/run_auth_schema_mysql_matrix.sh`.
+
+| Tabela | Conteúdo | Regras |
+| --- | --- | --- |
+| `auth_usuarios` | e-mail canônico (UNIQUE global), `papel`, `status` (`pendente`/`ativo`/`desativado`), hash argon2id + versão do pepper, TOTP cifrado + versão da chave + confirmação + último passo, falhas/bloqueios/`bloqueado_ate` | Nunca apagado (desativar); `ativo` exige hash |
+| `auth_sessoes` | SHA-256 do token, `estagio` (`completa`/`mfa`/`enrolamento`), SHA-256 do CSRF, tentativas, criação/uso/expiração/revogação | FK RESTRICT → usuário; desafios TOTP vivem aqui com estágio próprio |
+| `auth_tokens_servico` | nome, papel `operador`/`leitura`, SHA-256, expiração, revogação, último uso | CHECK proíbe `admin` |
+| `auth_tokens_uso_unico` | `ativacao`/`reset_senha`/`reset_mfa`, SHA-256, expiração, uso, revogação | FK RESTRICT → usuário; novo token revoga os não usados |
+| `auth_auditoria` | evento, resultado, ator (`usuario`/`token_servico`/`cli`/`anonimo`), alvo, IP de origem, `detalhe` JSON | Folha sem FK; eventos e chaves allowlisted; telefone/e-mail mascarados |
+
+Segredos em claro (senha, token, CSRF, segredo TOTP) nunca vão ao banco nem a log. Coluna `totp_segredo_cifrado` é `VARBINARY` com base64 de `nonce‖ciphertext‖tag` (aiomysql fixado não liga parâmetro `bytes`). Sem purge automático de sessões expiradas nem retenção de auditoria nesta fase.
+
 ---
 
 ## 6. OpenRouter e Medição de Uso
@@ -443,7 +462,7 @@ Tiers e planos comerciais não são tabelas de billing implementadas. Não hardc
 
 ## 7. API Endpoints
 
-Auth de operador não existe no app. O bloqueio Nginx é a fronteira atual; acesso direto pela rede Docker continua privilegiado e não deve ser publicado por outro proxy. Readiness de corpo mínimo não implica deadline total, que ainda é pendência.
+Toda rota de `/agentes` e `/sessoes` exige autenticação no app (§10.16): sem credencial ou inválida → 401; sem permissão → 403; chaves `AUTH_*` ausentes ou DB de auth indisponível → 503. A dependência roda antes da validação de corpo/query. O bloqueio Nginx continua: as rotas novas `/auth/*` também são internas (`app:5000`); expor é decisão separada. Readiness de corpo mínimo não implica deadline total, que ainda é pendência.
 
 F0-T4: allowlist pública exata do app nos dois Nginx: `GET /`,
 `GET /health`, `POST /webhook`, `POST /chatwoot/webhook`.
@@ -466,6 +485,29 @@ Docker. Nunca publicar porta do app; auth/RBAC permanece fora deste release.
 | `GET` | `/internal/health` | **FU-4:** diagnóstico completo anterior, acesso direto `app:5000` na rede Docker; negado pelo Nginx |
 | `GET` | `/health/provider-auth` | **FU-4:** snapshot diagnóstico interno, URL direta preservada; negado pelo Nginx |
 | `GET` | `/docs`, `/docs/oauth2-redirect`, `/redoc`, `/openapi.json` | **FU-4:** docs/schema FastAPI só via `app:5000` na rede Docker; Nginx nega prefixos `/docs`, `/redoc`, `/openapi.json` (slash final e encoding normalizado inclusos) |
+
+### Autenticação — interno (`app:5000`; Nginx 404)
+
+| Método | Rota | Descrição |
+|--------|------|-----------|
+| `POST` | `/auth/login` | `{email, senha}` → sessão (cookie `__Host-wpp_sessao` + `csrf_token` no corpo) ou, com TOTP confirmado, `{mfa_requerido: true, desafio}` sem cookie; falha sempre 401 genérico |
+| `POST` | `/auth/totp/verificar` | `{desafio, codigo}` → sessão |
+| `POST` | `/auth/totp/enrolar` | Sessão sem TOTP (não admin): inicia enrolamento voluntário |
+| `POST` | `/auth/totp/confirmar` | `{desafio, codigo}` conclui enrolamento (ativação de admin, `reset_mfa` ou voluntário) |
+| `POST` | `/auth/ativar` | `{token, senha?}` consome token de uso único (`ativacao`, `reset_senha`, `reset_mfa`) |
+| `POST` | `/auth/logout` | Revoga a sessão do cookie (exige CSRF) |
+| `GET` | `/auth/me` | Identidade, papel e validade da credencial |
+
+Permissões por rota (catálogo em `services/auth/rbac.py`):
+
+| Rota | admin | operador | leitura |
+| --- | --- | --- | --- |
+| `GET /agentes`, `GET /agentes/{id}`, `GET /agentes/{id}/consumo` | ✓ | ✓ | ✓, `numero_notificacao` mascarado |
+| `POST /agentes`, `DELETE /agentes/{id}` | ✓ | — | — |
+| `PUT /agentes/{id}` | ✓ (qualquer campo) | só `system_prompt`/`ativo` | — |
+| `GET /sessoes`, `GET /sessoes/{telefone}`, `GET …/historico` | ✓ | ✓ | ✓, telefone mascarado |
+| `POST …/transferir`, `POST …/retomar` | ✓ | ✓ | — |
+| `DELETE /sessoes/{telefone}` | ✓ | — | — |
 
 ### Agentes — interno (`app:5000`; Nginx 404)
 
@@ -508,6 +550,7 @@ Docker. Nunca publicar porta do app; auth/RBAC permanece fora deste release.
 | SDK `openai` | `1.54.0`, usado para OpenRouter |
 | HTTP / logging | `httpx==0.26.0`, `requests==2.31.0`, `loguru==0.7.2` |
 | Dependências auxiliares | `cryptography==42.0.8`, `python-dotenv==1.0.0` |
+| Autenticação da API | `argon2-cffi==25.1.0` (MIT), `pyotp==2.9.0` (MIT) |
 | Banco do bot | MySQL 8.0, não PostgreSQL |
 | Providers | Evolution API/Chatwoot self-hosted, Postgres/Redis próprios |
 | Orquestração / borda | Docker Engine + Compose / Nginx |
@@ -516,7 +559,7 @@ Números descrevem `requirements.in`/lock/Compose, não containers inspecionados
 
 ### Dependências reproduzíveis
 
-`app/requirements.in` fixa as 12 dependências diretas. `app/requirements.lock`
+`app/requirements.in` fixa as 14 dependências diretas. `app/requirements.lock`
 é o contrato de instalação (transitivas e hashes); `app/requirements.txt` é
 somente alias com `--require-hashes -r requirements.lock`.
 Gerar com Python 3.12 linux/amd64 e `pip-tools==7.5.1`:
@@ -784,6 +827,21 @@ Não armazenar chaves OpenRouter no banco. Não retornar chaves em endpoints, lo
 - Remover uma chave antes do fim do horizonte impede validar replay de receipt
   antigo e deve ser tratado como falha operacional, nunca como evento novo.
 - Nunca imprimir o mapa, seus valores, o bearer ou `payload_hmac` em log.
+
+### 9.3 Chaves de autenticação da API
+
+```env
+AUTH_PASSWORD_PEPPER_CURRENT_VERSION=1
+AUTH_PASSWORD_PEPPER_KEYS={}
+AUTH_TOTP_ENCRYPTION_CURRENT_VERSION=1
+AUTH_TOTP_ENCRYPTION_KEYS={}
+```
+
+- `AUTH_PASSWORD_PEPPER_KEYS`: JSON versionado, cada segredo ≥ 32 caracteres, nunca placeholder (`replace-*`, `change-me*`, `sua-*`, `gere-*`).
+- `AUTH_TOTP_ENCRYPTION_KEYS`: JSON versionado, cada valor base64 de exatamente 32 bytes (AES-256-GCM).
+- Mapa vazio (default dos templates) mantém `/agentes`, `/sessoes` e `/auth` fechados (503) e a CLI de auth recusa operar. Mapa inválido falha no startup sem imprimir valores.
+- Rotação: adicionar versão nova e torná-la corrente, mantendo as anteriores. Pepper antigo é substituído por rehash no próximo login; segredo TOTP antigo continua decifrável enquanto a versão existir. Remover versão em uso invalida login/TOTP desses usuários (exige reset).
+- Valores ficam só no `.env` real; nunca no banco, logs, respostas ou `repr`. Durações de sessão (30 min ocioso, 12 h absoluto) são constantes de código.
 
 ---
 
@@ -1965,6 +2023,21 @@ Review round 1:
   Classificação por mensagem exata com teste de paridade contra o módulo que
   levanta; mensagem renomeada falha teste, nunca vira código genérico calado.
 
+### 10.16 Autenticação e autorização da API (empresa única)
+
+- Credencial por request: cookie `__Host-wpp_sessao` (HttpOnly, Secure, SameSite=Strict, Path=/, sem Domain) **ou** `Authorization: Bearer wpt_…` de token de serviço; ambos juntos → 401. Token de sessão nunca é aceito como Bearer.
+- Validação em transação própria curta (`get_auth_sessions`), nunca na UoW de domínio; produz `Principal` escalar imutável. Sem locks: leitura + `UPDATE` condicional de `ultimo_uso_em` (≤ 1×/60 s). Revogação vale para requests validados depois do commit.
+- Sessão: 32 bytes aleatórios, banco guarda SHA-256; 30 min ocioso, 12 h absoluto; revogada por logout, CLI, troca de papel, desativação, reset de senha/MFA. Admin só valida com TOTP confirmado.
+- CSRF: mutação autenticada por cookie exige `X-CSRF-Token` igual ao emitido no login (comparação constante); Bearer não usa cookie ambiente e dispensa CSRF.
+- Senha: NFC, 8–64 caracteres, blocklist, sem composição; HMAC-SHA-256 com pepper versionado → argon2id `m=64 MiB, t=3, p=4`, fora de transação e fora do event loop; rehash no login.
+- Login sem enumeração: e-mail inexistente, usuário pendente/desativado, conta bloqueada, senha errada, admin sem TOTP e entrada malformada → mesma resposta 401 e exatamente uma derivação argon2id. Lockout por conta: 10 falhas (senha ou TOTP) → 15 min, dobrando até 24 h; sucesso zera. Limite por origem em memória por processo (30 tentativas/5 min por endpoint de credencial) → 429 + `Retry-After`.
+- TOTP: RFC 6238 SHA-1/6 dígitos/30 s, janela ±1, aceito só para passo maior que o último sob lock do usuário (anti-replay), 5 tentativas por desafio, segredo AES-256-GCM com AAD da linha do usuário. Obrigatório para admin; ativação de admin fica `pendente` até confirmar TOTP; recuperação só por token `reset_mfa` emitido na CLI (sem "esqueci a senha").
+- RBAC: papéis fixos no código; toda rota de `/agentes`/`/sessoes` declara exatamente um `exigir(...)` e o guard do router recusa (403) rota sem declaração. Papel desconhecido não tem permissão. Tokens de serviço nunca são `admin` (contornariam o MFA).
+- Mascaramento: sem `sessao.ler_telefone` (`leitura`) todo `telefone` de sessão e o `numero_notificacao` legado do agente viram `5511*****0042` nas respostas. Conteúdo de mensagens do histórico e de `system_prompt` não é reescrito.
+- Auditoria: `auth_auditoria` com eventos e chaves allowlisted. Mutação de domínio grava o evento na mesma transação da mudança, depois dos locks (folha sem FK): sem auditoria, sem mudança. Login, MFA e negação de acesso usam transação própria; falha nela é sinalizada (contador + ERROR, limiar 1) sem alterar a resposta. Telefone/e-mail sempre mascarados.
+- CLI container-only `python -m src.auth_cli`: `bootstrap-admin` (só sem nenhum admin; corrida serializada pelo range de índice), `usuario criar|listar|papel|desativar|reativar|desbloquear|revogar-sessoes|reset --tipo senha|mfa|ativacao`, `token criar|listar|revogar`. Tokens exibidos uma vez em stdout. Último admin utilizável não pode ser rebaixado/desativado. `--actor` vai para a auditoria (`ator_tipo=cli`).
+- Perímetro: CLIs operacionais existentes (`delivery_cli`, `agent_scheduler_cli`, `provider_auth_cli`) e acesso ao container não passam por este login; acesso ao container continua privilegiado.
+
 ---
 
 ## 11. Contratos implementados e limites atuais
@@ -2362,8 +2435,9 @@ docker compose exec chatwoot bundle exec rails db:chatwoot_prepare
 
 Sem ticket e aprovação explícita, não implementar:
 
-- Portal multi-empresa, usuários/MFA/RBAC, `empresa_id` ou migração de tenancy: direção planejada, não runtime entregue.
-- Dashboard web próprio, SSO, JWT/OAuth ou outro mecanismo de login improvisado.
+- Portal multi-empresa, papéis configuráveis/por empresa, `empresa_id` ou migração de tenancy: direção planejada, não runtime entregue. Usuários, papéis fixos, TOTP e auditoria de empresa única existem só na API (§10.16).
+- Dashboard web próprio, tela de login, SSO, JWT/OAuth, "esqueci a senha" ou outro mecanismo de login improvisado.
+- Expor `/auth`, `/agentes` ou `/sessoes` no Nginx: decisão separada, com rate limit de borda e revisão própria.
 - Google Calendar, agendamentos, follow-ups, CRM externo e broadcast.
 - Suporte do bot WhatsApp a áudio, imagem ou documentos.
 - Billing/cobrança automática, pagamentos e reserva estrita de orçamento.
