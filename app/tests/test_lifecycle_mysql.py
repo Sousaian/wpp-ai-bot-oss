@@ -44,6 +44,7 @@ from src.database.repositories import (
 from src.routers import agentes as agentes_router
 from src.routers import sessoes as sessoes_router
 from src.services import llm_client
+from tests import auth_fixtures
 from tests import test_turn_delivery_mysql as t06
 
 
@@ -57,14 +58,14 @@ class LifecycleMySQLTests(t06.TurnDeliveryMySQLTests):
     async def _transfer(self, agent: int, phone: str) -> dict:
         async with self.sessions() as db:
             result = await sessoes_router.transferir_sessao(
-                telefone=phone, agente_id=agent, motivo=None, db=db
+                telefone=phone, agente_id=agent, motivo=None, db=db, principal=auth_fixtures.ADMIN
             )
             await db.commit()
         return result
 
     async def _resume(self, agent: int, phone: str) -> dict:
         async with self.sessions() as db:
-            result = await sessoes_router.retomar_sessao(telefone=phone, agente_id=agent, db=db)
+            result = await sessoes_router.retomar_sessao(telefone=phone, agente_id=agent, db=db, principal=auth_fixtures.ADMIN)
             await db.commit()
         return result
 
@@ -72,7 +73,7 @@ class LifecycleMySQLTests(t06.TurnDeliveryMySQLTests):
         values = values or {"ativo": False}
         async with self.sessions() as db:
             result = await agentes_router.atualizar_agente(
-                agente_id=agent, dados=agentes_router.AgenteUpdateSchema(**values), db=db
+                agente_id=agent, dados=agentes_router.AgenteUpdateSchema(**values), db=db, principal=auth_fixtures.ADMIN
             )
             await db.commit()
         return result
@@ -403,12 +404,12 @@ class LifecycleMySQLTests(t06.TurnDeliveryMySQLTests):
         self.assertTrue(await self._complete(claimed[0]))
         await self._status(
             409,
-            lambda db: sessoes_router.deletar_sessao(telefone=phone, agente_id=agent, db=db),
+            lambda db: sessoes_router.deletar_sessao(telefone=phone, agente_id=agent, db=db, principal=auth_fixtures.ADMIN),
             lifecycle_repo.SCHEDULER_HISTORY_MESSAGE,
         )
         await self._status(
             409,
-            lambda db: agentes_router.deletar_agente(agente_id=agent, db=db),
+            lambda db: agentes_router.deletar_agente(agente_id=agent, db=db, principal=auth_fixtures.ADMIN),
             lifecycle_repo.SCHEDULER_HISTORY_MESSAGE,
         )
         self.assertEqual(await self._count(Sessao), 1)
@@ -418,7 +419,7 @@ class LifecycleMySQLTests(t06.TurnDeliveryMySQLTests):
         agent, _, phone, _ = await self._ordinary_admitted("del-pending")
         await self._status(
             409,
-            lambda db: sessoes_router.deletar_sessao(telefone=phone, agente_id=agent, db=db),
+            lambda db: sessoes_router.deletar_sessao(telefone=phone, agente_id=agent, db=db, principal=auth_fixtures.ADMIN),
         )
 
     async def test_delete_without_history_still_deletes(self) -> None:
@@ -427,10 +428,10 @@ class LifecycleMySQLTests(t06.TurnDeliveryMySQLTests):
             db.add(Sessao(agente_id=agent, telefone="5511000099", delivery_stream_key=str(uuid4())))
             await db.commit()
         async with self.sessions() as db:
-            await sessoes_router.deletar_sessao(telefone="5511000099", agente_id=agent, db=db)
+            await sessoes_router.deletar_sessao(telefone="5511000099", agente_id=agent, db=db, principal=auth_fixtures.ADMIN)
             await db.commit()
         async with self.sessions() as db:
-            await agentes_router.deletar_agente(agente_id=agent, db=db)
+            await agentes_router.deletar_agente(agente_id=agent, db=db, principal=auth_fixtures.ADMIN)
             await db.commit()
         self.assertEqual((await self._count(Sessao), await self._count(Agente)), (0, 0))
 
@@ -459,9 +460,9 @@ class LifecycleMySQLTests(t06.TurnDeliveryMySQLTests):
             await db.commit()
         await self._status(
             409,
-            lambda db: sessoes_router.deletar_sessao(telefone="5511000098", agente_id=agent, db=db),
+            lambda db: sessoes_router.deletar_sessao(telefone="5511000098", agente_id=agent, db=db, principal=auth_fixtures.ADMIN),
         )
-        await self._status(409, lambda db: agentes_router.deletar_agente(agente_id=agent, db=db))
+        await self._status(409, lambda db: agentes_router.deletar_agente(agente_id=agent, db=db, principal=auth_fixtures.ADMIN))
         self.assertEqual((await self._count(Sessao), await self._count(Agente)), (1, 1))
 
     # ── audited operator paths ──────────────────────────────────────────

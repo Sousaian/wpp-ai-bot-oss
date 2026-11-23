@@ -1,4 +1,4 @@
-"""AUTH-1: API operator authentication against a real disposable MySQL.
+"""AUTH-1/2: API operator authentication against a real disposable MySQL.
 
 Routes are exercised through the ASGI app with a real cookie jar; users and
 tokens are created through the same service the container CLI uses. Only
@@ -17,7 +17,11 @@ from datetime import timedelta
 from pathlib import Path
 from unittest.mock import patch
 
+import base64
+import time
+
 import httpx
+import pyotp
 from argon2 import PasswordHasher, Type
 from fastapi.routing import APIRoute
 from pydantic import SecretStr
@@ -35,18 +39,29 @@ from src.database.models import (
     AuthUsuario,
     Base,
 )
-from src.services.auth import administracao, contexto, limites, segredos, senha
+from src.services.auth import administracao, contexto, limites, rbac, segredos, senha, totp
 from tests.disposable_db import assert_disposable_database
 
 
 TEST_DATABASE_URL = os.getenv("OUTBOX_TEST_DATABASE_URL")
 REPO_ROOT = Path(os.environ.get("WPP_REPO_ROOT", Path(__file__).resolve().parents[2]))
 PEPPER = {1: SecretStr("auth-test-pepper-synthetic-0123456789abcdef")}
+TOTP_KEYS = {1: SecretStr(base64.b64encode(bytes(range(32))).decode())}
 SENHA = "frase longa sintetica 42"
 BASE_URL = "https://auth.invalid"
 AUTH_TABLES = ("auth_auditoria", "auth_sessoes", "auth_tokens_uso_unico", "auth_tokens_servico", "auth_usuarios")
 PRODUCTION_HASHER = senha.HASHER
 CHEAP = PasswordHasher(time_cost=1, memory_cost=8, parallelism=1, hash_len=32, salt_len=16, type=Type.ID)
+
+class FakeTime:
+    """Stands in for the ``time`` module inside services/auth/totp.py."""
+
+    def __init__(self, clock: list[float]) -> None:
+        self._clock = clock
+
+    def time(self) -> float:
+        return self._clock[0]
+
 
 class CountingHasher(PasswordHasher):
     """Counts argon2 derivations (the base class uses __slots__)."""
@@ -87,10 +102,19 @@ class AuthApiMySQLTests(unittest.IsolatedAsyncioTestCase):
         async with self.engine.begin() as connection:
             for table in AUTH_TABLES:
                 await connection.execute(text(f"DELETE FROM {table}"))
+            # Routes that mutate sessions need the runtime this process expects.
+            await connection.execute(text("UPDATE delivery_runtime_state SET mode='direct'"))
         self.patches = ExitStack()
         self.patches.enter_context(patch.object(settings, "auth_password_pepper_keys", PEPPER))
         self.patches.enter_context(patch.object(settings, "auth_password_pepper_current_version", 1))
         self.patches.enter_context(patch.object(senha, "HASHER", CHEAP))
+        self.patches.enter_context(patch.object(settings, "auth_totp_encryption_keys", TOTP_KEYS))
+        self.patches.enter_context(patch.object(settings, "auth_totp_encryption_current_version", 1))
+        # Virtual clock: every TOTP use moves 30 s ahead, so anti-replay holds
+        # while a test logs the same admin in several times.
+        self.clock = [time.time()]
+        self.patches.enter_context(patch.object(totp, "time", FakeTime(self.clock)))
+        self.totp_secrets: dict[str, str] = {}
         limites.LIMITE.reset()
 
         async def db_override():
@@ -121,14 +145,37 @@ class AuthApiMySQLTests(unittest.IsolatedAsyncioTestCase):
     async def user(self, papel: str, email: str | None = None, *, ativar: bool = True) -> tuple[int, str]:
         email = email or f"{papel}-{len(self.clients)}-{id(self)}@example.invalid"
         if papel == "admin" and not await self.count(AuthUsuario, AuthUsuario.papel == "admin"):
-            emitido = await administracao.bootstrap_admin(self.sessions, email=email)
+            emitido = await administracao.bootstrap_admin(self.sessions, ator="teste", email=email)
         else:
-            emitido = await administracao.criar_usuario(self.sessions, email=email, papel=papel)
+            emitido = await administracao.criar_usuario(self.sessions, ator="teste", email=email, papel=papel)
         if ativar:
             response = await self.client("192.0.2.200").post(
                 "/auth/ativar", json={"token": emitido.token, "senha": SENHA})
             self.assertEqual(response.status_code, 200, response.text)
+            if papel == "admin":
+                body = response.json()
+                self.assertEqual(body["status"], "totp_enrolamento_requerido")
+                await self.confirm(body, email)
         return emitido.usuario_id, email
+
+    def code(self, email: str) -> str:
+        self.clock[0] += totp.PERIODO
+        return pyotp.TOTP(self.totp_secrets[email]).at(self.clock[0])
+
+    async def confirm(self, body: dict, email: str) -> None:
+        self.totp_secrets[email] = body["totp_segredo"]
+        response = await self.client("192.0.2.201").post(
+            "/auth/totp/confirmar", json={"desafio": body["desafio"], "codigo": self.code(email)})
+        self.assertEqual(response.status_code, 200, response.text)
+
+    async def full_login(self, email: str, password: str = SENHA, source: str = "198.51.100.20"):
+        """Password and, when challenged, the TOTP step: client + final response."""
+
+        client, response = await self.login(email, password, source)
+        if response.status_code == 200 and response.json()["mfa_requerido"]:
+            response = await client.post("/auth/totp/verificar", json={
+                "desafio": response.json()["desafio"], "codigo": self.code(email)})
+        return client, response
 
     async def login(self, email: str, password: str = SENHA, source: str = "198.51.100.20"):
         client = self.client(source)
@@ -137,12 +184,12 @@ class AuthApiMySQLTests(unittest.IsolatedAsyncioTestCase):
 
     async def logged(self, papel: str) -> tuple[httpx.AsyncClient, str, int]:
         usuario_id, email = await self.user(papel)
-        client, response = await self.login(email)
+        client, response = await self.full_login(email)
         self.assertEqual(response.status_code, 200, response.text)
         return client, response.json()["csrf_token"], usuario_id
 
     async def service_token(self, papel: str, dias: int = 30) -> tuple[str, int]:
-        created = await administracao.criar_token_servico(self.sessions, nome=f"auto-{papel}", papel=papel, dias=dias)
+        created = await administracao.criar_token_servico(self.sessions, ator="teste", nome=f"auto-{papel}", papel=papel, dias=dias)
         return created["token"], created["id"]
 
     async def count(self, model, *criteria) -> int:
@@ -163,7 +210,7 @@ class AuthApiMySQLTests(unittest.IsolatedAsyncioTestCase):
         routes = protected_routes()
         self.assertEqual(len(routes), 12, routes)
         for router in (main.agentes_router, main.sessoes_router):
-            self.assertIn(contexto.exigir_admin, [d.dependency for d in router.dependencies])
+            self.assertIn(rbac.exigir_rota_declarada, [d.dependency for d in router.dependencies])
 
     async def test_missing_or_invalid_credentials_are_401_on_every_route(self) -> None:
         await self.user("admin")
@@ -186,39 +233,19 @@ class AuthApiMySQLTests(unittest.IsolatedAsyncioTestCase):
                 executed += 1
         self.assertEqual(executed, 7 * 12)
 
-    async def test_non_admin_roles_are_403_and_admin_passes(self) -> None:
-        operador, operador_csrf, _ = await self.logged("operador")
-        leitura, leitura_csrf, _ = await self.logged("leitura")
-        admin, admin_csrf, _ = await self.logged("admin")
-        tokens = {papel: (await self.service_token(papel))[0] for papel in ("operador", "leitura")}
-        executed = 0
-        for method, path in protected_routes():
-            for client, csrf in ((operador, operador_csrf), (leitura, leitura_csrf)):
-                response = await self.call(client, method, path, headers={contexto.CSRF_HEADER: csrf}, json={})
-                self.assertEqual(response.status_code, 403, (method, path, response.text))
-                executed += 1
-            for token in tokens.values():
-                response = await self.call(self.client(), method, path,
-                                           headers={"Authorization": f"Bearer {token}"}, json={})
-                self.assertEqual(response.status_code, 403, (method, path, response.text))
-                executed += 1
-            response = await self.call(admin, method, path, headers={contexto.CSRF_HEADER: admin_csrf}, json={})
-            self.assertNotIn(response.status_code, (401, 403), (method, path, response.text))
-            executed += 1
-        self.assertEqual(executed, 12 * 5)
-
-    async def test_unprovisioned_pepper_fails_closed_503(self) -> None:
-        with patch.object(settings, "auth_password_pepper_keys", {}):
-            client = self.client()
-            for method, path in protected_routes():
-                self.assertEqual((await self.call(client, method, path, json={})).status_code, 503)
-            response = await client.post("/auth/login", json={"email": "a@example.invalid", "senha": SENHA})
-            self.assertEqual(response.status_code, 503)
+    async def test_unprovisioned_keyrings_fail_closed_503(self) -> None:
+        for setting in ("auth_password_pepper_keys", "auth_totp_encryption_keys"):
+            with patch.object(settings, setting, {}):
+                client = self.client()
+                for method, path in protected_routes():
+                    self.assertEqual((await self.call(client, method, path, json={})).status_code, 503, setting)
+                response = await client.post("/auth/login", json={"email": "a@example.invalid", "senha": SENHA})
+                self.assertEqual(response.status_code, 503, setting)
 
     # ── cookie and CSRF ─────────────────────────────────────────────────
     async def test_session_cookie_attributes_and_real_jar(self) -> None:
         _, email = await self.user("admin")
-        client, response = await self.login(email)
+        client, response = await self.full_login(email)
         self.assertEqual(response.status_code, 200)
         cookie = response.headers["set-cookie"]
         self.assertTrue(cookie.startswith(f"{contexto.SESSION_COOKIE}=wps_"))
@@ -288,7 +315,7 @@ class AuthApiMySQLTests(unittest.IsolatedAsyncioTestCase):
                            .values(ultimo_uso_em=func.utc_timestamp(6) - text("INTERVAL 1801 SECOND")))
         self.assertEqual((await admin.get("/agentes")).status_code, 401)
         # Absolute 12 h: refused even when recently used.
-        fresh, _ = await self.login(await self._email(usuario_id))
+        fresh, _ = await self.full_login(await self._email(usuario_id))
         row = await self._session_row(usuario_id)
         self.assertEqual((await fresh.get("/agentes")).status_code, 200)
         await self.execute(update(AuthSessao).where(AuthSessao.id == row.id)
@@ -313,19 +340,19 @@ class AuthApiMySQLTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await replay.get("/auth/me")).status_code, 401)
 
         email = await self._email(admin_id)
-        first, _ = await self.login(email)
-        second, _ = await self.login(email)
-        await administracao.revogar_sessoes(self.sessions, usuario_id=admin_id)
+        first, _ = await self.full_login(email)
+        second, _ = await self.full_login(email)
+        await administracao.revogar_sessoes(self.sessions, ator="teste", usuario_id=admin_id)
         for client in (first, second):
             self.assertEqual((await client.get("/agentes")).status_code, 401)
 
         # Role change and deactivation revoke immediately.
         operador, _, operador_id = await self.logged("operador")
-        await administracao.alterar_papel(self.sessions, usuario_id=operador_id, papel="leitura")
+        await administracao.alterar_papel(self.sessions, ator="teste", usuario_id=operador_id, papel="leitura")
         self.assertEqual((await operador.get("/auth/me")).status_code, 401)
         leitura, _ = await self.login(await self._email(operador_id))
         self.assertEqual((await leitura.get("/auth/me")).json()["papel"], "leitura")
-        await administracao.alterar_status(self.sessions, usuario_id=operador_id, ativo=False)
+        await administracao.alterar_status(self.sessions, ator="teste", usuario_id=operador_id, ativo=False)
         self.assertEqual((await leitura.get("/auth/me")).status_code, 401)
         self.assertEqual((await self.login(await self._email(operador_id)))[1].status_code, 401)
 
@@ -336,7 +363,7 @@ class AuthApiMySQLTests(unittest.IsolatedAsyncioTestCase):
             return [(await admin.get("/auth/me")).status_code for _ in range(20)]
 
         statuses, _ = await asyncio.gather(
-            requests(), administracao.revogar_sessoes(self.sessions, usuario_id=admin_id))
+            requests(), administracao.revogar_sessoes(self.sessions, ator="teste", usuario_id=admin_id))
         # Once a 401 is seen, no later request succeeds (revocation is monotonic).
         if 401 in statuses:
             self.assertTrue(all(code == 401 for code in statuses[statuses.index(401):]), statuses)
@@ -362,11 +389,11 @@ class AuthApiMySQLTests(unittest.IsolatedAsyncioTestCase):
         token, token_id = await self.service_token("leitura")
         bearer = {"Authorization": f"Bearer {token}"}
         self.assertEqual((await self.client().get("/auth/me", headers=bearer)).status_code, 200)
-        self.assertEqual((await administracao.revogar_token_servico(self.sessions, token_id=token_id))["status"],
+        self.assertEqual((await administracao.revogar_token_servico(self.sessions, ator="teste", token_id=token_id))["status"],
                          "revogado")
         self.assertEqual((await self.client().get("/auth/me", headers=bearer)).status_code, 401)
         with self.assertRaises(administracao.Recusado) as refused:
-            await administracao.revogar_token_servico(self.sessions, token_id=token_id)
+            await administracao.revogar_token_servico(self.sessions, ator="teste", token_id=token_id)
         self.assertEqual(refused.exception.code, "token_ja_revogado")
 
     async def test_service_token_never_admin_and_bounded(self) -> None:
@@ -374,7 +401,7 @@ class AuthApiMySQLTests(unittest.IsolatedAsyncioTestCase):
                              ({"papel": "operador", "dias": 0}, "validade_invalida"),
                              ({"papel": "operador", "dias": 366}, "validade_invalida")):
             with self.assertRaises(administracao.Recusado) as refused:
-                await administracao.criar_token_servico(self.sessions, nome="x", **kwargs)
+                await administracao.criar_token_servico(self.sessions, ator="teste", nome="x", **kwargs)
             self.assertEqual(refused.exception.code, code)
         with self.assertRaises(Exception):
             async with self.sessions() as db:
@@ -434,7 +461,7 @@ class AuthApiMySQLTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([limites.duracao_bloqueio(n) for n in (0, 1, 2, 6, 7, 30)],
                          [timedelta(minutes=15), timedelta(minutes=30), timedelta(hours=1),
                           timedelta(hours=16), timedelta(hours=24), timedelta(hours=24)])
-        await administracao.desbloquear(self.sessions, usuario_id=usuario_id)
+        await administracao.desbloquear(self.sessions, ator="teste", usuario_id=usuario_id)
         self.assertEqual((await self.login(email))[1].status_code, 200)
         async with self.sessions() as db:
             row = (await db.execute(select(AuthUsuario).where(AuthUsuario.id == usuario_id))).scalar_one()
@@ -444,11 +471,15 @@ class AuthApiMySQLTests(unittest.IsolatedAsyncioTestCase):
         _, ativo = await self.user("operador", "ativo@example.invalid")
         _, pendente = await self.user("leitura", "pendente@example.invalid", ativar=False)
         desativado_id, desativado = await self.user("leitura", "desativado@example.invalid")
-        await administracao.alterar_status(self.sessions, usuario_id=desativado_id, ativo=False)
+        await administracao.alterar_status(self.sessions, ator="teste", usuario_id=desativado_id, ativo=False)
         bloqueado_id, bloqueado = await self.user("leitura", "bloqueado@example.invalid")
         await self.execute(update(AuthUsuario).where(AuthUsuario.id == bloqueado_id)
                            .values(bloqueado_ate=func.utc_timestamp(6) + text("INTERVAL 1 HOUR")))
+        admin_id, admin_sem_mfa = await self.user("admin", "admin-sem-mfa@example.invalid")
+        await self.execute(update(AuthUsuario).where(AuthUsuario.id == admin_id).values(
+            totp_segredo_cifrado=None, totp_chave_versao=None, totp_confirmado_em=None, totp_ultimo_passo=None))
         cases = {
+            "admin_without_totp": (admin_sem_mfa, SENHA),
             "unknown": ("ninguem@example.invalid", SENHA),
             "wrong_password": (ativo, "senha errada 000"),
             "pending": (pendente, SENHA),
@@ -515,7 +546,7 @@ class AuthApiMySQLTests(unittest.IsolatedAsyncioTestCase):
 
     # ── activation, reset and bootstrap ─────────────────────────────────
     async def test_activation_token_single_use_and_expiry(self) -> None:
-        emitido = await administracao.criar_usuario(self.sessions, email="novo@example.invalid", papel="operador")
+        emitido = await administracao.criar_usuario(self.sessions, ator="teste", email="novo@example.invalid", papel="operador")
         async with self.sessions() as db:
             stored = (await db.execute(select(AuthTokenUsoUnico))).scalar_one()
         self.assertEqual(stored.token_hash, segredos.digest(emitido.token))
@@ -527,7 +558,7 @@ class AuthApiMySQLTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((reused.status_code, reused.json()), (400, {"detail": "token invalido"}))
         self.assertEqual((await self.login("novo@example.invalid"))[1].status_code, 200)
 
-        reset = await administracao.emitir_reset(self.sessions, usuario_id=emitido.usuario_id, tipo="senha")
+        reset = await administracao.emitir_reset(self.sessions, ator="teste", usuario_id=emitido.usuario_id, tipo="senha")
         self.assertEqual((await self.login("novo@example.invalid"))[1].status_code, 200)
         await self.execute(update(AuthTokenUsoUnico).where(AuthTokenUsoUnico.token_hash == segredos.digest(reset.token))
                            .values(criado_em=func.utc_timestamp(6) - text("INTERVAL 2 DAY"),
@@ -535,8 +566,8 @@ class AuthApiMySQLTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await client.post("/auth/ativar", json={"token": reset.token, "senha": SENHA})).status_code, 400)
         # A new reset revokes the previous unused token and every session.
         logged, _ = await self.login("novo@example.invalid")
-        first = await administracao.emitir_reset(self.sessions, usuario_id=emitido.usuario_id, tipo="senha")
-        second = await administracao.emitir_reset(self.sessions, usuario_id=emitido.usuario_id, tipo="senha")
+        first = await administracao.emitir_reset(self.sessions, ator="teste", usuario_id=emitido.usuario_id, tipo="senha")
+        second = await administracao.emitir_reset(self.sessions, ator="teste", usuario_id=emitido.usuario_id, tipo="senha")
         self.assertEqual((await logged.get("/auth/me")).status_code, 401)
         self.assertEqual((await client.post("/auth/ativar", json={"token": first.token, "senha": SENHA})).status_code, 400)
         new_password = "outra frase sintetica 7"
@@ -548,11 +579,11 @@ class AuthApiMySQLTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(replay.status_code, 400)
         self.assertEqual((await self.login("novo@example.invalid", new_password))[1].status_code, 200)
         with self.assertRaises(administracao.Recusado) as refused:
-            await administracao.emitir_reset(self.sessions, usuario_id=emitido.usuario_id, tipo="ativacao")
+            await administracao.emitir_reset(self.sessions, ator="teste", usuario_id=emitido.usuario_id, tipo="ativacao")
         self.assertEqual(refused.exception.code, "tipo_incompativel_com_status")
 
     async def test_concurrent_activation_consumes_token_once(self) -> None:
-        emitido = await administracao.criar_usuario(self.sessions, email="corrida@example.invalid", papel="leitura")
+        emitido = await administracao.criar_usuario(self.sessions, ator="teste", email="corrida@example.invalid", papel="leitura")
         responses = await asyncio.gather(*[
             self.client(f"192.0.2.{n}").post("/auth/ativar", json={"token": emitido.token, "senha": f"{SENHA} {n}"})
             for n in range(4)
@@ -561,7 +592,7 @@ class AuthApiMySQLTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_bootstrap_only_once_even_concurrently(self) -> None:
         results = await asyncio.gather(
-            *[administracao.bootstrap_admin(self.sessions, email=f"boot{n}@example.invalid") for n in range(3)],
+            *[administracao.bootstrap_admin(self.sessions, ator="teste", email=f"boot{n}@example.invalid") for n in range(3)],
             return_exceptions=True,
         )
         ok = [r for r in results if isinstance(r, administracao.TokenEmitido)]
@@ -573,18 +604,18 @@ class AuthApiMySQLTests(unittest.IsolatedAsyncioTestCase):
     async def test_last_admin_is_protected(self) -> None:
         admin_id, _ = await self.user("admin")
         for operation in (
-            administracao.alterar_papel(self.sessions, usuario_id=admin_id, papel="operador"),
-            administracao.alterar_status(self.sessions, usuario_id=admin_id, ativo=False),
+            administracao.alterar_papel(self.sessions, ator="teste", usuario_id=admin_id, papel="operador"),
+            administracao.alterar_status(self.sessions, ator="teste", usuario_id=admin_id, ativo=False),
         ):
             with self.assertRaises(administracao.Recusado) as refused:
                 await operation
             self.assertEqual(refused.exception.code, "ultimo_admin")
         second_id, _ = await self.user("admin")
-        await administracao.alterar_status(self.sessions, usuario_id=admin_id, ativo=False)
+        await administracao.alterar_status(self.sessions, ator="teste", usuario_id=admin_id, ativo=False)
         with self.assertRaises(administracao.Recusado):
-            await administracao.alterar_papel(self.sessions, usuario_id=second_id, papel="leitura")
+            await administracao.alterar_papel(self.sessions, ator="teste", usuario_id=second_id, papel="leitura")
         with self.assertRaises(administracao.Recusado) as refused:
-            await administracao.criar_usuario(self.sessions, email=(await self._email(second_id)).upper(),
+            await administracao.criar_usuario(self.sessions, ator="teste", email=(await self._email(second_id)).upper(),
                                               papel="leitura")
         self.assertEqual(refused.exception.code, "email_indisponivel")
 

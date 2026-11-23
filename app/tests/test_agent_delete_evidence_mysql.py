@@ -20,6 +20,7 @@ from src.database.models import (
 )
 from src.database.repositories import lifecycle_repo, scheduler_retention_repo as retention
 from src.routers import agentes as agentes_router, sessoes as sessoes_router
+from tests import auth_fixtures
 from tests import test_scheduler_retention_mysql as base
 
 
@@ -72,7 +73,7 @@ class AgentDeleteEvidenceMySQLTests(base.SchedulerRetentionMySQLTests):
     async def _http_delete(self, agent: int) -> tuple[int, str | None]:
         async with self.sessions() as db:
             try:
-                await agentes_router.deletar_agente(agente_id=agent, db=db)
+                await agentes_router.deletar_agente(agente_id=agent, db=db, principal=auth_fixtures.ADMIN)
                 await db.commit()
                 return 204, None
             except HTTPException as exc:
@@ -283,7 +284,7 @@ class AgentDeleteEvidenceMySQLTests(base.SchedulerRetentionMySQLTests):
     async def _session_delete(self, agent: int, phone: str) -> tuple[int, str | None]:
         async with self.sessions() as db:
             try:
-                await sessoes_router.deletar_sessao(telefone=phone, agente_id=agent, db=db)
+                await sessoes_router.deletar_sessao(telefone=phone, agente_id=agent, db=db, principal=auth_fixtures.ADMIN)
                 await db.commit()
                 return 204, None
             except HTTPException as exc:

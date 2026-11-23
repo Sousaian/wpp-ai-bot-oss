@@ -1,7 +1,7 @@
 """FastAPI dependencies that authenticate every /agentes, /sessoes, /auth call.
 
 Fail closed: no credential or an invalid one → 401; authenticated without the
-required role → 403; auth not provisioned or its DB unavailable → 503.
+required permission → 403 (``rbac.exigir``); auth not provisioned or its DB unavailable → 503.
 Validation runs in its own short transaction on ``get_auth_sessions`` (never
 the route's ``get_db`` session) and yields an immutable scalar ``Principal``;
 no ORM row reaches a route, so the domain UoW starts clean (§16.1 A1).
@@ -74,7 +74,9 @@ def indisponivel() -> HTTPException:
 
 
 def exigir_configuracao() -> None:
-    if not settings.auth_password_pepper_configured():
+    """Pepper and TOTP keyrings both provisioned (admin login needs TOTP)."""
+
+    if not settings.auth_configured():
         raise indisponivel()
 
 
@@ -84,6 +86,8 @@ def sessao_vigente(sessao, usuario, agora: datetime) -> bool:
         and sessao.expira_em > agora
         and sessao.ultimo_uso_em > agora - SESSAO_OCIOSA
         and usuario.status == "ativo"
+        # AUTH-2: an admin session is valid only while TOTP stays enrolled.
+        and (usuario.papel != "admin" or usuario.totp_confirmado_em is not None)
     )
 
 
@@ -179,11 +183,3 @@ async def autenticar(
     ):
         raise proibido("csrf invalido")
     return valida.principal
-
-
-async def exigir_admin(principal: Principal = Depends(autenticar)) -> Principal:
-    """AUTH-1 authorization: only ``admin`` reaches /agentes and /sessoes."""
-
-    if principal.papel != "admin":
-        raise proibido()
-    return principal

@@ -1,7 +1,7 @@
 """Opaque bearer secrets: 32 random bytes, only SHA-256 is persisted.
 
 Each kind has its own prefix, so a secret of one kind is never accepted as
-another (a session token is not a service token, a CSRF token is neither).
+another (a session token is not a service token, a challenge is not a session).
 """
 
 from __future__ import annotations
@@ -13,13 +13,15 @@ import secrets
 from typing import Literal
 
 
-Tipo = Literal["sessao", "csrf", "servico", "uso_unico"]
+Tipo = Literal["sessao", "csrf", "servico", "uso_unico", "desafio"]
 
 PREFIXOS: dict[str, str] = {
     "sessao": "wps_",
     "csrf": "wpc_",
     "servico": "wpt_",
     "uso_unico": "wpa_",
+    # MFA/enrolment challenge: body only, never accepted as a session cookie.
+    "desafio": "wpd_",
 }
 # token_urlsafe(32) → 43 characters of the URL-safe base64 alphabet.
 _CORPO = re.compile(r"[A-Za-z0-9_-]{43}")

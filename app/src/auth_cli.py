@@ -81,41 +81,41 @@ def _token(emitido: administracao.TokenEmitido) -> dict[str, object]:
     return {
         "status": "emitido", "usuario_id": emitido.usuario_id, "tipo": emitido.tipo,
         "token": emitido.token, "expira_em": emitido.expira_em.isoformat(),
-        "uso": "POST /auth/ativar {token, senha}; exibido uma unica vez",
+        "uso": "POST /auth/ativar {token, senha}; admin e reset_mfa seguem com /auth/totp/confirmar; exibido uma unica vez",
     }
 
 
 async def run(args: argparse.Namespace, sessions=AsyncSessionLocal, emit=_emit) -> int:
     try:
         if args.command == "bootstrap-admin":
-            emit(_token(await administracao.bootstrap_admin(sessions, email=args.email)))
+            emit(_token(await administracao.bootstrap_admin(sessions, ator=args.actor, email=args.email)))
         elif args.command == "usuario":
             command = args.usuario_command
             if command == "listar":
                 emit({"usuarios": await administracao.listar_usuarios(sessions)})
             elif command == "criar":
-                emit(_token(await administracao.criar_usuario(sessions, email=args.email, papel=args.papel)))
+                emit(_token(await administracao.criar_usuario(sessions, ator=args.actor, email=args.email, papel=args.papel)))
             elif command == "papel":
-                emit(await administracao.alterar_papel(sessions, usuario_id=args.usuario_id, papel=args.papel))
+                emit(await administracao.alterar_papel(sessions, ator=args.actor, usuario_id=args.usuario_id, papel=args.papel))
             elif command in {"desativar", "reativar"}:
                 emit(await administracao.alterar_status(
-                    sessions, usuario_id=args.usuario_id, ativo=command == "reativar"))
+                    sessions, ator=args.actor, usuario_id=args.usuario_id, ativo=command == "reativar"))
             elif command == "desbloquear":
-                emit(await administracao.desbloquear(sessions, usuario_id=args.usuario_id))
+                emit(await administracao.desbloquear(sessions, ator=args.actor, usuario_id=args.usuario_id))
             elif command == "revogar-sessoes":
-                emit(await administracao.revogar_sessoes(sessions, usuario_id=args.usuario_id))
+                emit(await administracao.revogar_sessoes(sessions, ator=args.actor, usuario_id=args.usuario_id))
             else:
                 emit(_token(await administracao.emitir_reset(
-                    sessions, usuario_id=args.usuario_id, tipo=args.tipo)))
+                    sessions, ator=args.actor, usuario_id=args.usuario_id, tipo=args.tipo)))
         else:
             command = args.token_command
             if command == "listar":
                 emit({"tokens": await administracao.listar_tokens_servico(sessions)})
             elif command == "criar":
                 emit(await administracao.criar_token_servico(
-                    sessions, nome=args.nome, papel=args.papel, dias=args.dias))
+                    sessions, ator=args.actor, nome=args.nome, papel=args.papel, dias=args.dias))
             else:
-                emit(await administracao.revogar_token_servico(sessions, token_id=args.token_id))
+                emit(await administracao.revogar_token_servico(sessions, ator=args.actor, token_id=args.token_id))
     except administracao.Recusado as exc:
         emit({"status": "refused", "reason": exc.code})
         return 1
@@ -132,8 +132,8 @@ def main() -> int:
     require_runtime_version(settings.delivery_worker_code_version)
     setup_logger()
     args = _parser().parse_args()
-    if not settings.auth_password_pepper_configured():
-        _emit({"status": "error", "reason": "auth_password_pepper_keys_unconfigured"})
+    if not settings.auth_configured():
+        _emit({"status": "error", "reason": "auth_keyrings_unconfigured"})
         return 2
 
     async def entrypoint() -> int:
