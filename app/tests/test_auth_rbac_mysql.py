@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import unittest
+from uuid import uuid4
 from unittest.mock import patch
 
 import pyotp
@@ -55,10 +56,10 @@ EXPECTED_ALLOWED = {
 class AuthRbacMySQLTests(base.AuthApiMySQLTests):
     # ── fixtures ────────────────────────────────────────────────────────
     async def agent_with_session(self) -> int:
+        # A fresh agent per test: (agente_id, telefone) is unique, so rows left
+        # by other suites never collide and nothing is deleted globally.
         async with self.sessions() as db:
-            await db.execute(text("DELETE FROM mensagens"))
-            await db.execute(text("DELETE FROM sessoes"))
-            agente = Agente(nome="rbac sintetico", instance_name=f"rbac-{id(self)}", system_prompt="original",
+            agente = Agente(nome="rbac sintetico", instance_name=f"rbac-{uuid4()}", system_prompt="original",
                             numero_notificacao=PHONE, modelo_llm="openai/gpt-4o-mini")
             db.add(agente)
             await db.flush()
@@ -454,7 +455,8 @@ class AuthRbacMySQLTests(base.AuthApiMySQLTests):
                 await admin.post(f"/sessoes/{PHONE}/transferir", params={"agente_id": agente_id},
                                  headers={"X-CSRF-Token": csrf})
         async with self.sessions() as db:
-            handler = (await db.execute(select(Sessao.handler).where(Sessao.telefone == PHONE))).scalar_one()
+            handler = (await db.execute(select(Sessao.handler).where(
+                Sessao.telefone == PHONE, Sessao.agente_id == agente_id))).scalar_one()
         self.assertEqual(handler, "bot")  # no audit, no transfer
 
 
