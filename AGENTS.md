@@ -14,7 +14,7 @@ Vigência: 2026-11-19. Valem para pessoas e agentes (Traycer, Codex, Claude e ou
 3. **Higiene pública (bloqueante):** nunca commitar segredos, `.env` reais, tokens, números/JIDs reais de WhatsApp, conversas reais, nomes de clientes ou empresas atendidas, caminhos absolutos de máquina (`/home/...`), IDs de recursos privados ou links para ferramentas internas. Dados de teste só sintéticos (`*.invalid`, `example.invalid`, `55119999990xx`). Antes de abrir PR: varredura com gitleaks (ou equivalente) na árvore e nos commits novos, sem achados reais.
 4. **Licença:** Apache-2.0. Mantenha `LICENSE` e `NOTICE`. Nova dependência exige licença compatível com redistribuição Apache-2.0 (permissivas preferidas); dependência copyleft forte embutida no processo exige aprovação explícita. Serviços externos (Evolution, Chatwoot, MySQL) continuam sob as próprias licenças.
 5. **Posicionamento:** plataforma open source e self-hosted. Não reintroduzir linguagem de produto B2B/SaaS comercial nem roadmap comercial privado na documentação pública.
-6. **Legado:** os módulos removidos em 2026-11-19 (`session_manager`, `notificador`, CRUD/repo de `atendentes`, `models/schemas.py`, `evo-api/`) não voltam; `app/tests/test_legacy_removal.py` protege isso. Itens de compatibilidade mantidos (classe B de `LEGACY_REMOVAL_REPORT.md`) só saem com os pré-requisitos documentados ali, incluindo migração auditada para schema.
+6. **Arquitetura e compatibilidade:** persistir sessões em MySQL; atribuição e disponibilidade de atendentes ficam no Chatwoot. Preservar contratos dos modos direct, outbox e scheduler. Não retirar tabelas, campos ou valores de enum de compatibilidade sem migração explícita e auditada, com backup, restauração testada e validação em MySQL novo e existente. Coordenar SQL, ORM, API e testes conforme §5.6.
 7. **Testes obrigatórios antes de PR:** suíte completa `python -m unittest discover` com MySQL 8.0 descartável em rede interna (credenciais sintéticas), sem falhas. Linha de base atual: **751 testes OK**. Mudança de contrato de documentação atualiza o teste correspondente no mesmo PR. Testes que pulam por falta de MySQL não contam como aprovação.
 8. **Planejamento interno** (tickets, specs, revisões e evidências) fica fora do repositório. A documentação pública resume decisões e estado sem depender desses artefatos.
 
@@ -38,7 +38,6 @@ Definição e roadmap → [README.md](README.md), [mapa e estado](docs/mapa-do-p
 
 | Entrega | Código | Operação |
 | --- | --- | --- |
-| MVP JSON / notificações WhatsApp a atendentes | Módulos Python removidos | Não participa do runtime |
 | OpenRouter, allowlist, `consumo_llm`, soft limit | Implementados | E2E pareado do release atual pendente |
 | Handoff Chatwoot | Implementado | Setup e validação operacional pendentes |
 | Outbox fenced + CLIs de cutover/rollback | Implementados | `DELIVERY_MODE=direct`, dispatch desligado por default |
@@ -53,7 +52,7 @@ Não usar números antigos de testes ou status de versões como prova de execuç
 
 `[TRANSFERIR]` é removido do texto ao lead. Sessão termina com motivo de handoff; bot cria/associa conversa Chatwoot e envia transição. Resposta humana retorna por `POST /chatwoot/webhook`. No scheduler, final-candidate e contexto tardio seguem §10.13/§10.14.
 
-`atendentes`, `numero_notificacao`, `motivo_handoff` e handler `humano` preservam compatibilidade histórica. Não criar round-robin próprio nem voltar a enviar resumos WhatsApp a atendentes.
+`atendentes`, `numero_notificacao`, `motivo_handoff` e handler `humano` preservam compatibilidade histórica. Não implementar atribuição própria nem enviar resumos de handoff a atendentes por WhatsApp.
 
 ## 2. Ferramentas e Providers
 
@@ -130,7 +129,7 @@ Mapas → [arquitetura](docs/mapa-do-projeto/arquitetura.md), [operação e vers
 | Controle/health | `provider_auth_cli.py`, `services/provider_auth_bootstrap.py`, `replica_compat.py`, `scheduler_observability.py` | Auth, compatibilidade, snapshots e métricas |
 | Operador | `delivery_cli.py`, `agent_scheduler_cli.py` | Cutover, resolução, enablement e opt-in auditados |
 
-Inventário detalhado → [mapa do código](docs/mapa-do-projeto/codigo.md). `agents/agent_config.py` não existe nesta base; não recriar legado por causa de diagramas antigos.
+Inventário detalhado → [mapa do código](docs/mapa-do-projeto/codigo.md).
 
 ### 3.3 Mensagem recebida — três caminhos distintos
 
@@ -266,9 +265,9 @@ INDEX idx_consumo_llm_sessao (sessao_id),
 UNIQUE KEY uq_consumo_llm_generation (provider_generation_id)
 ```
 
-### 5.5 Tabela `atendentes` — Legado v3b
+### 5.5 Tabela `atendentes` — Compatibilidade do schema
 
-Tabela e ORM preservados para histórico e compatibilidade SQL. CRUD, schemas de rota e repositório Python removidos; **não participa do fluxo de handoff v4**. Não remover armazenamento sem migração de dados auditada. Ver `LEGACY_REMOVAL_REPORT.md`.
+Tabela e ORM mantêm dados históricos e a referência de `sessoes.atendente_id`. O Chatwoot gerencia a atribuição do handoff sem usar essa tabela. Não executar DROP no schema atual; qualquer mudança destrutiva exige migração explícita e auditada (§0).
 
 ### 5.6 Migrations e compatibilidade existentes
 
@@ -489,10 +488,6 @@ Docker. Nunca publicar porta do app; auth/RBAC permanece fora deste release.
 | `POST` | `/sessoes/{telefone}/retomar` | Retoma atendimento pelo bot |
 | `DELETE` | `/sessoes/{telefone}` | Deleta sessão |
 | `GET` | `/sessoes/{telefone}/historico` | Histórico de mensagens |
-
-### Cadastro v3b removido
-
-Rotas de cadastro v3b não são mais registradas. Persistência histórica permanece.
 
 ### Chatwoot
 
@@ -2063,7 +2058,7 @@ Conferir branch/árvore/instruções antes de trabalhar; não editar worktree de
 - Lógica de negócio nos `services/`
 - Rotas em `routers/` apenas orquestram — sem queries ORM diretas
 - `llm_client.py` é o único módulo que conhece endpoint, headers e detalhes de resposta do OpenRouter
-- Não reintroduzir armazenamento JSON de sessões removido
+- Persistir sessões em MySQL via repositórios
 
 ---
 
@@ -2078,8 +2073,8 @@ Conferir branch/árvore/instruções antes de trabalhar; não editar worktree de
 | Usar `float` para custo, crédito ou franquia | Erros de precisão financeira |
 | Cobrar por contagem de mensagens sem usage real | Cada modelo e chamada tem custo diferente |
 | Instanciar OpenAI/OpenRouter diretamente no `agent_runner.py` | Viola centralização do provider |
-| Reintroduzir armazenamento JSON de sessões | MVP removido |
-| Reintroduzir notificação WhatsApp ou round-robin v3b | Módulos removidos; usar Chatwoot |
+| Persistir sessões em JSON | MySQL é a fonte de verdade das sessões |
+| Notificar atendentes sobre handoff por WhatsApp | Chatwoot gerencia o atendimento humano |
 | SQL/ORM direto em router ou service | Viola separação de camadas |
 | `print()` para logging | Usar Loguru |
 | `handler='humano'` em novos fluxos | Substituído por `handler='encerrada'` |
@@ -2313,7 +2308,7 @@ Operação CRUD somente pela rede Docker (sem ingress público):
 docker compose exec app python -c 'import httpx; r=httpx.get("http://127.0.0.1:5000/agentes"); r.raise_for_status(); print(r.status_code)'
 ```
 
-Mesmo limite para `/sessoes*`, `/atendentes*`, `/internal/*`, `/health/*` e docs.
+Mesmo limite para `/sessoes*`, `/internal/*`, `/health/*` e docs.
 `delivery-ops` permanece CLI interna. Provider-auth/probes usam `app:5000`,
 nunca passam pelo Nginx. Validação real da borda:
 `WPP_TEST_RESOURCE_PREFIX=p42- scripts/run_fu4_health_nginx.sh` (descartável).
@@ -2377,7 +2372,3 @@ Sem ticket e aprovação explícita, não implementar:
 - CI, upgrade de dependências ou infraestrutura como efeito lateral de documentação.
 
 Testes automatizados já são parte do desenvolvimento; não estão proibidos até uma validação manual. Ativação operacional, chamadas reais e mudanças destrutivas continuam exigindo aprovação própria.
-
-### Remoção de superfície legada — 2026-11-19
-
-CRUD de cadastro v3b, armazenamento JSON, notificação WhatsApp v3b e schemas MVP sem consumidores foram removidos. Handoff permanece no Chatwoot. Schema/ORM histórico e compatibilidade operacional permanecem; nenhuma migration destrutiva foi adicionada. Inventário, limites e procedimento de backup → [relatório de remoção](LEGACY_REMOVAL_REPORT.md).

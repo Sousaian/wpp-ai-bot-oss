@@ -21,7 +21,7 @@ Base `main` = `dev` = `5908a94`, snapshot documental de 2026-11-09: F0 integrado
 | [sessoes.py](../../app/src/routers/sessoes.py) | Leitura/histórico, transferir/retomar, delete fenced |
 | [chatwoot.py](../../app/src/routers/chatwoot.py) | Assinatura/parse e delegação de `/chatwoot/webhook` |
 
-`Depends(get_db)` não é autenticação. CRUD continua sem auth de operador; Nginx F0 o bloqueia, acesso direto ao app pela rede Docker permanece privilegiado. Schemas ativos estão nos próprios routers. Schemas MVP sem consumidores foram removidos.
+`Depends(get_db)` não é autenticação. CRUD continua sem auth de operador; Nginx F0 o bloqueia, acesso direto ao app pela rede Docker permanece privilegiado. Schemas ativos estão nos próprios routers.
 
 ## Negócio e providers
 
@@ -103,12 +103,11 @@ Não deslocar SQL de negócio para router/service novo. [Mapa de dados](dados.md
 - [check_release_config_real.py](../../scripts/check_release_config_real.py) → prova Compose real, snapshot/descoberta/sentinela e mutações.
 - [test_image_version.sh](../../scripts/test_image_version.sh) → label de imagem reutilizada e SHA-dirty para builds de teste.
 
-## Provas e legado
+## Provas
 
 - [app/tests/](../../app/tests/) → unitários, contratos, MySQL, concorrência/shutdown e fixtures.
 - [scripts/](../../scripts/) → wrappers de matrizes/mutações, shape/digests, medição e provisionamento; nem todos read-only.
 - [tests/provider_contracts/](../../tests/provider_contracts/) e [Compose de validação](../../docker-compose.provider-auth-validation.yml) → contratos isolados, não deployment principal.
-- `agents/agent_config.py` não existe nesta base.
 
 ## Investigação por sintoma
 
@@ -121,7 +120,3 @@ Não deslocar SQL de negócio para router/service novo. [Mapa de dados](dados.md
 | Agente não usa scheduler | Opt-in → flags/estado/epochs → frota |
 | Health lento | main → pool/DB → caches/frota → snapshot |
 | Processo não encerra | app_server/watchdog → quiescência → deadlines/heartbeat |
-
-### Remoção de superfície legada — 2026-11-19
-
-CRUD de cadastro v3b, armazenamento JSON, notificação WhatsApp v3b e schemas MVP sem consumidores foram removidos. Handoff permanece no Chatwoot. Schema/ORM histórico e compatibilidade operacional permanecem; nenhuma migration destrutiva foi adicionada. Inventário, limites e procedimento de backup → [relatório de remoção](../../LEGACY_REMOVAL_REPORT.md).
