@@ -1,5 +1,6 @@
 """T08-2 disposable MySQL tests; no provider and no schema/guard bypass in purge."""
 import asyncio
+import gc
 import importlib
 import json
 import tempfile
@@ -977,6 +978,10 @@ class SchedulerRetentionMySQLTests(unittest.IsolatedAsyncioTestCase):
              patch.object(worker, '_heartbeat', beat), \
              patch.object(worker, '_replica_beat', replica_beat), \
              patch.object(worker_module, 'engine', self.engine):
+            # The 0.3 s budget measures loop scheduling, not the interpreter: a
+            # full-heap gen2 collection late in the suite can pause ~0.5 s.
+            gc.collect()
+            gc.disable()
             started = time.monotonic()
             task = asyncio.create_task(worker.run())
             try:
@@ -988,6 +993,7 @@ class SchedulerRetentionMySQLTests(unittest.IsolatedAsyncioTestCase):
                 self.assertLess(replicas[0] - started, 0.3)
                 self.assertEqual(starts, 1)  # no overlapping pass at zero cadence
             finally:
+                gc.enable()
                 worker.request_stop()
                 await asyncio.wait_for(task, 5)
         # Cancellation rolled back the candidate and released all graph locks.
