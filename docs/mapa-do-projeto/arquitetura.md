@@ -92,7 +92,3 @@ Resultado conhecido pode registrar só accounting após perda de autoridade; des
 - Shutdown limitado não torna legado crash-safe: cancelamento pós-LLM ainda pode reverter uso antes do commit.
 
 Locks, guards e tempos exatos → [AGENTS.md §10](../../AGENTS.md#10-princípios-arquiteturais-obrigatórios), sem criar contrato concorrente neste mapa.
-
-### Remoção de superfície legada — 2026-11-19
-
-CRUD de cadastro v3b, armazenamento JSON, notificação WhatsApp v3b e schemas MVP sem consumidores foram removidos. Handoff permanece no Chatwoot. Schema/ORM histórico e compatibilidade operacional permanecem; nenhuma migration destrutiva foi adicionada. Inventário, limites e procedimento de backup → [relatório de remoção](../../LEGACY_REMOVAL_REPORT.md).

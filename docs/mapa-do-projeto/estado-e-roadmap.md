@@ -107,7 +107,3 @@ D5 e D6 permanecem abertas. D9/backend/RPO, D11/desenho de deadline e D10/estrat
 O detalhamento de planejamento (release operacional, bloqueadores, T6–T10/FU-R1–R3 e painel multiusuário) é mantido fora do repositório pelo mantenedor (§0.8). Este mapa resume o estado sem depender desses artefatos.
 
 Fontes operacionais portáteis: [AGENTS](../../AGENTS.md), [delivery](../durable-delivery-runbook.md), [inbox](../inbox-scheduler-runbook.md). Mudança futura deve atualizar as três camadas: contrato, código e mapa correspondente.
-
-### Remoção de superfície legada — 2026-11-19
-
-CRUD de cadastro v3b, armazenamento JSON, notificação WhatsApp v3b e schemas MVP sem consumidores foram removidos. Handoff permanece no Chatwoot. Schema/ORM histórico e compatibilidade operacional permanecem; nenhuma migration destrutiva foi adicionada. Inventário, limites e procedimento de backup → [relatório de remoção](../../LEGACY_REMOVAL_REPORT.md).

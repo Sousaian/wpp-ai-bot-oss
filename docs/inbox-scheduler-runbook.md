@@ -419,7 +419,3 @@ Trust includes Git/builder/daemon, not malicious host/forged receipt or changes
 after the gate. SIGTERM143/SIGINT130 unwind owned children/context; SIGKILL can
 leave private0700/0600 data. External recovery only by exact job-owned path,
 never scan/glob/prune. Uncommitted diff tests are not a clean release certificate.
-
-### Remoção de superfície legada — 2026-11-19
-
-CRUD de cadastro v3b, armazenamento JSON, notificação WhatsApp v3b e schemas MVP sem consumidores foram removidos. Handoff permanece no Chatwoot. Schema/ORM histórico e compatibilidade operacional permanecem; nenhuma migration destrutiva foi adicionada. Inventário, limites e procedimento de backup → [relatório de remoção](../LEGACY_REMOVAL_REPORT.md).
