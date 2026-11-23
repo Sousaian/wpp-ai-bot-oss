@@ -335,6 +335,22 @@ class AuthRbacMySQLTests(base.AuthApiMySQLTests):
                                                                          "codigo": "١٢٣٤٥٦"})
         self.assertEqual(confirm.status_code, 401)
 
+    async def test_enrolment_confirmation_rejects_non_ascii_digits(self) -> None:
+        _, email = await self.user("operador")
+        client, response = await self.login(email)
+        enrol = await client.post("/auth/totp/enrolar", headers={"X-CSRF-Token": response.json()["csrf_token"]})
+        desafio = enrol.json()["desafio"]
+        for codigo in ("１２３４５６", "١٢٣٤٥٦"):
+            bad = await self.client().post("/auth/totp/confirmar", json={"desafio": desafio, "codigo": codigo})
+            self.assertEqual((bad.status_code, bad.json()), (401, {"detail": "codigo invalido"}))
+        async with self.sessions() as db:
+            attempts = (await db.execute(text("SELECT tentativas_mfa FROM auth_sessoes WHERE token_hash = :h"),
+                                         {"h": segredos.digest(desafio)})).scalar_one()
+        self.assertEqual(attempts, 2)
+        self.totp_secrets[email] = enrol.json()["totp_segredo"]
+        ok = await self.client().post("/auth/totp/confirmar", json={"desafio": desafio, "codigo": self.code(email)})
+        self.assertEqual(ok.status_code, 200)
+
     async def test_totp_failures_count_toward_lockout(self) -> None:
         admin_id, email = await self.user("admin")
         for _ in range(2):
