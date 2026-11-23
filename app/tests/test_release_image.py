@@ -19,7 +19,7 @@ class ReleaseImageTests(unittest.TestCase):
         self.assertIn('CMD ["python", "-m", "src.app_server"]', dockerfile)
         direct = re.findall(r"^([\w-]+)(?:\[[^]]+\])?==([^\s]+)$",
                             (root / "app/requirements.in").read_text(), re.M)
-        self.assertEqual(len(direct), 12)
+        self.assertEqual(len(direct), 13)  # AUTH-1: + argon2-cffi
         lock = (root / "app/requirements.lock").read_text()
         self.assertIn("pip-tools==7.5.1", lock)
         for name, version in direct:

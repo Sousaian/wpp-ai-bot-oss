@@ -48,6 +48,7 @@ LOG_ENTRYPOINTS = {
     "app/src/main.py": None,  # module import (uvicorn loads src.main:app)
     "app/src/delivery_cli.py": "main",
     "app/src/provider_auth_cli.py": "main",
+    "app/src/auth_cli.py": "main",
     "app/src/delivery_worker.py": "__main__",
     "app/src/turn_worker.py": "__main__",
 }

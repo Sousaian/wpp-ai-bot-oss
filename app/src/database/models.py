@@ -18,7 +18,7 @@ from sqlalchemy import (
     UniqueConstraint,
     text,
 )
-from sqlalchemy.dialects.mysql import BIGINT, CHAR, DATETIME, ENUM as MYSQL_ENUM, INTEGER, SMALLINT
+from sqlalchemy.dialects.mysql import BIGINT, CHAR, DATETIME, ENUM as MYSQL_ENUM, INTEGER, SMALLINT, VARBINARY
 from sqlalchemy.orm import relationship, DeclarativeBase
 from datetime import datetime
 from uuid import uuid4
@@ -1419,3 +1419,181 @@ class SchedulerRetentionProgress(Base):
     id = Column(Integer, primary_key=True, autoincrement=False)
     last_turn_id = Column(BIGINT(unsigned=True), nullable=False)
     version = Column(BIGINT(unsigned=True), nullable=False)
+
+
+# ── AUTH-1: API operator authentication (single company) ─────────────────
+# Leaf tables; db/init.sql is the DDL source and validates their exact shape.
+# Users are never deleted (status desativado), so the RESTRICT FKs add no
+# delete path. Access only through ``repositories/auth_repo.py``.
+AUTH_PAPEIS = ("admin", "operador", "leitura")
+AUTH_PAPEIS_TOKEN_SERVICO = ("operador", "leitura")
+
+
+class AuthUsuario(Base):
+    __tablename__ = "auth_usuarios"
+    __table_args__ = (
+        UniqueConstraint("email", name="uq_auth_usuario_email"),
+        Index("idx_auth_usuario_papel", "papel", "status"),
+        CheckConstraint("papel IN ('admin','operador','leitura')", name="ck_auth_usuario_papel"),
+        CheckConstraint(
+            "status IN ('pendente','ativo','desativado')", name="ck_auth_usuario_status"
+        ),
+        CheckConstraint(
+            "(senha_hash IS NULL) = (senha_pepper_versao IS NULL) "
+            "AND (status <> 'ativo' OR senha_hash IS NOT NULL)",
+            name="ck_auth_usuario_senha",
+        ),
+        CheckConstraint(
+            "(totp_segredo_cifrado IS NULL) = (totp_chave_versao IS NULL) "
+            "AND (totp_confirmado_em IS NULL OR totp_segredo_cifrado IS NOT NULL)",
+            name="ck_auth_usuario_totp",
+        ),
+    )
+
+    id = Column(BIGINT(unsigned=True), primary_key=True, autoincrement=True)
+    # Canonical form (strip + NFC + lowercase) is computed by the service.
+    email = Column(String(254, collation="utf8mb4_bin"), nullable=False)
+    papel = Column(String(16, collation="ascii_bin"), nullable=False)
+    status = Column(String(16, collation="ascii_bin"), nullable=False)
+    senha_hash = Column(String(255, collation="ascii_bin"), nullable=True)
+    senha_pepper_versao = Column(INTEGER(unsigned=True), nullable=True)
+    totp_segredo_cifrado = Column(VARBINARY(255), nullable=True)
+    totp_chave_versao = Column(INTEGER(unsigned=True), nullable=True)
+    totp_confirmado_em = Column(DATETIME(fsp=6), nullable=True)
+    totp_ultimo_passo = Column(BIGINT(unsigned=True), nullable=True)
+    falhas_consecutivas = Column(INTEGER(unsigned=True), nullable=False, default=0)
+    bloqueios_consecutivos = Column(INTEGER(unsigned=True), nullable=False, default=0)
+    bloqueado_ate = Column(DATETIME(fsp=6), nullable=True)
+    criado_em = Column(
+        DATETIME(fsp=6), nullable=False, server_default=text("CURRENT_TIMESTAMP(6)")
+    )
+    atualizado_em = Column(
+        DATETIME(fsp=6),
+        nullable=False,
+        server_default=text("CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6)"),
+    )
+
+
+class AuthSessao(Base):
+    """Opaque server-side session; the DB keeps only SHA-256 of the token."""
+
+    __tablename__ = "auth_sessoes"
+    __table_args__ = (
+        UniqueConstraint("token_hash", name="uq_auth_sessao_token"),
+        Index("idx_auth_sessao_usuario", "usuario_id", "revogada_em"),
+        Index("idx_auth_sessao_expira", "expira_em"),
+        CheckConstraint(
+            "estagio IN ('mfa','enrolamento','completa')", name="ck_auth_sessao_estagio"
+        ),
+        CheckConstraint(
+            "(revogada_em IS NULL) = (motivo_revogacao IS NULL)",
+            name="ck_auth_sessao_revogacao",
+        ),
+    )
+
+    id = Column(BIGINT(unsigned=True), primary_key=True, autoincrement=True)
+    token_hash = Column(CHAR(64, charset="ascii", collation="ascii_bin"), nullable=False)
+    usuario_id = Column(
+        BIGINT(unsigned=True),
+        ForeignKey(
+            "auth_usuarios.id",
+            name="fk_auth_sessao_usuario",
+            ondelete="RESTRICT",
+            onupdate="RESTRICT",
+        ),
+        nullable=False,
+    )
+    estagio = Column(String(16, collation="ascii_bin"), nullable=False)
+    csrf_hash = Column(CHAR(64, charset="ascii", collation="ascii_bin"), nullable=True)
+    tentativas_mfa = Column(INTEGER(unsigned=True), nullable=False, default=0)
+    criada_em = Column(DATETIME(fsp=6), nullable=False)
+    ultimo_uso_em = Column(DATETIME(fsp=6), nullable=False)
+    expira_em = Column(DATETIME(fsp=6), nullable=False)
+    revogada_em = Column(DATETIME(fsp=6), nullable=True)
+    motivo_revogacao = Column(String(32, collation="ascii_bin"), nullable=True)
+
+
+class AuthTokenServico(Base):
+    """Bearer token for automations; hash only, bound to a non-admin role."""
+
+    __tablename__ = "auth_tokens_servico"
+    __table_args__ = (
+        UniqueConstraint("token_hash", name="uq_auth_token_servico_hash"),
+        CheckConstraint(
+            "papel IN ('operador','leitura')", name="ck_auth_token_servico_papel"
+        ),
+        CheckConstraint("expira_em > criado_em", name="ck_auth_token_servico_validade"),
+    )
+
+    id = Column(BIGINT(unsigned=True), primary_key=True, autoincrement=True)
+    nome = Column(String(100, collation="utf8mb4_bin"), nullable=False)
+    papel = Column(String(16, collation="ascii_bin"), nullable=False)
+    token_hash = Column(CHAR(64, charset="ascii", collation="ascii_bin"), nullable=False)
+    criado_em = Column(DATETIME(fsp=6), nullable=False)
+    expira_em = Column(DATETIME(fsp=6), nullable=False)
+    revogado_em = Column(DATETIME(fsp=6), nullable=True)
+    ultimo_uso_em = Column(DATETIME(fsp=6), nullable=True)
+
+
+class AuthTokenUsoUnico(Base):
+    """Out-of-band activation/reset token, consumed exactly once."""
+
+    __tablename__ = "auth_tokens_uso_unico"
+    __table_args__ = (
+        UniqueConstraint("token_hash", name="uq_auth_token_uso_unico_hash"),
+        Index("idx_auth_token_uso_unico_usuario", "usuario_id", "tipo"),
+        CheckConstraint(
+            "tipo IN ('ativacao','reset_senha','reset_mfa')",
+            name="ck_auth_token_uso_unico_tipo",
+        ),
+        CheckConstraint("expira_em > criado_em", name="ck_auth_token_uso_unico_validade"),
+    )
+
+    id = Column(BIGINT(unsigned=True), primary_key=True, autoincrement=True)
+    usuario_id = Column(
+        BIGINT(unsigned=True),
+        ForeignKey(
+            "auth_usuarios.id",
+            name="fk_auth_token_uso_unico_usuario",
+            ondelete="RESTRICT",
+            onupdate="RESTRICT",
+        ),
+        nullable=False,
+    )
+    tipo = Column(String(16, collation="ascii_bin"), nullable=False)
+    token_hash = Column(CHAR(64, charset="ascii", collation="ascii_bin"), nullable=False)
+    criado_em = Column(DATETIME(fsp=6), nullable=False)
+    expira_em = Column(DATETIME(fsp=6), nullable=False)
+    usado_em = Column(DATETIME(fsp=6), nullable=True)
+    revogado_em = Column(DATETIME(fsp=6), nullable=True)
+
+
+class AuthAuditoria(Base):
+    """Append-only access/admin audit; leaf without FK, masked ``detalhe``."""
+
+    __tablename__ = "auth_auditoria"
+    __table_args__ = (
+        Index("idx_auth_auditoria_data", "ocorrido_em"),
+        Index("idx_auth_auditoria_ator", "ator_tipo", "ator_id", "ocorrido_em"),
+        CheckConstraint(
+            "resultado IN ('sucesso','negado','falha')", name="ck_auth_auditoria_resultado"
+        ),
+        CheckConstraint(
+            "ator_tipo IN ('usuario','token_servico','cli','anonimo')",
+            name="ck_auth_auditoria_ator",
+        ),
+    )
+
+    id = Column(BIGINT(unsigned=True), primary_key=True, autoincrement=True)
+    ocorrido_em = Column(
+        DATETIME(fsp=6), nullable=False, server_default=text("CURRENT_TIMESTAMP(6)")
+    )
+    evento = Column(String(48, collation="ascii_bin"), nullable=False)
+    resultado = Column(String(16, collation="ascii_bin"), nullable=False)
+    ator_tipo = Column(String(16, collation="ascii_bin"), nullable=False)
+    ator_id = Column(BIGINT(unsigned=True), nullable=True)
+    ator_rotulo = Column(String(100, collation="utf8mb4_bin"), nullable=True)
+    alvo_tipo = Column(String(32, collation="ascii_bin"), nullable=True)
+    alvo_id = Column(String(64, collation="ascii_bin"), nullable=True)
+    origem_ip = Column(String(45, collation="ascii_bin"), nullable=True)
+    detalhe = Column(JSON, nullable=True)

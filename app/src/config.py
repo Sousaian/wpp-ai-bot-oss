@@ -22,6 +22,9 @@ INBOUND_RECEIPT_HMAC_PUBLIC_PLACEHOLDERS = frozenset(
     }
 )
 
+# AUTH-1: a pepper must be an independent high-entropy secret.
+AUTH_SECRET_MIN_LENGTH = 32
+
 
 
 # Seconds an authorized automated send keeps its lane past the provider deadline.
@@ -175,6 +178,16 @@ class Settings(BaseSettings):
     chatwoot_webhook_secret: str | None = Field(default=None, repr=False)
     chatwoot_webhook_max_age_seconds: int = Field(default=300, ge=30, le=3600)
 
+    # AUTH-1: API operator login (/auth, /agentes, /sessoes). An empty pepper
+    # keyring keeps every protected route closed (503); keys never render.
+    # Rotation adds a version and keeps the old ones until every hash using
+    # them was rehashed on login.
+    auth_password_pepper_current_version: int = Field(default=1, ge=1, le=65535)
+    auth_password_pepper_keys: dict[int, SecretStr] = Field(
+        default_factory=dict,
+        repr=False,
+    )
+
     @field_validator("chatwoot_webhook_id", mode="before")
     @classmethod
     def blank_managed_webhook_id_is_unset(cls, value: object) -> object:
@@ -201,6 +214,12 @@ class Settings(BaseSettings):
         if not value.strip() or "\x00" in value or not Path(value).is_absolute():
             raise ValueError("local snapshot paths must be absolute")
         return value
+
+    @model_validator(mode="after")
+    def auth_keyrings_are_valid(self) -> "Settings":
+        if self.auth_password_pepper_keys and not self.auth_password_pepper_configured():
+            raise ValueError("auth password pepper keyring is invalid")
+        return self
 
     @model_validator(mode="after")
     def monitor_refreshes_before_snapshot_expiry(self) -> "Settings":
@@ -331,6 +350,13 @@ class Settings(BaseSettings):
             for secret in keys.values()
         )
 
+    def auth_password_pepper_configured(self) -> bool:
+        """Current version present; every retained key long and not a placeholder."""
+        keys = self.auth_password_pepper_keys
+        return bool(keys) and self.auth_password_pepper_current_version in keys and all(
+            _auth_secret_is_usable(secret) for secret in keys.values()
+        )
+
     def receipt_hmac_keyring_fingerprint(self) -> str:
         """Bind readiness snapshots to every retained key, without exposing keys."""
         if not self.receipt_hmac_keyring_is_valid():
@@ -357,6 +383,17 @@ class Settings(BaseSettings):
         case_sensitive=False,
         extra="ignore",
         hide_input_in_errors=True,
+    )
+
+
+def _auth_secret_is_usable(secret: object) -> bool:
+    if not isinstance(secret, SecretStr):
+        return False
+    value = secret.get_secret_value().strip()
+    folded = value.casefold()
+    return bool(
+        len(value) >= AUTH_SECRET_MIN_LENGTH
+        and not folded.startswith(("replace-", "change-me", "sua-", "gere-"))
     )
 
 

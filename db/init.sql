@@ -3001,3 +3001,406 @@ CALL validate_sec2_s1_retention_index()$$
 DROP PROCEDURE validate_sec2_s1_retention_index$$
 -- sec2-s1-schema-boundary: index-validated
 DELIMITER ;
+
+-- AUTH-1: API operator authentication (single company, API only). Additive
+-- leaf tables: no existing table gains a column, FK, CHECK or trigger, and
+-- scheduler_runtime_state.schema_version is unchanged (workers never read
+-- them). Users are never deleted (status desativado), so the RESTRICT FKs
+-- below add no DELETE/purge path. A future company scope adds a column;
+-- e-mail stays globally unique. VARCHAR + CHECK instead of ENUM (a NOT NULL
+-- ENUM silently defaults to its first member); CHECK literals carry the
+-- _ascii introducer of their ascii columns (digest-stable form).
+CREATE TABLE IF NOT EXISTS auth_usuarios (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    email VARCHAR(254) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+    papel VARCHAR(16) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    status VARCHAR(16) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    senha_hash VARCHAR(255) CHARACTER SET ascii COLLATE ascii_bin NULL,
+    senha_pepper_versao INT UNSIGNED NULL,
+    totp_segredo_cifrado VARBINARY(255) NULL,
+    totp_chave_versao INT UNSIGNED NULL,
+    totp_confirmado_em DATETIME(6) NULL,
+    totp_ultimo_passo BIGINT UNSIGNED NULL,
+    falhas_consecutivas INT UNSIGNED NOT NULL DEFAULT 0,
+    bloqueios_consecutivos INT UNSIGNED NOT NULL DEFAULT 0,
+    bloqueado_ate DATETIME(6) NULL,
+    criado_em DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    atualizado_em DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_auth_usuario_email (email),
+    INDEX idx_auth_usuario_papel (papel, status),
+    CONSTRAINT ck_auth_usuario_papel CHECK (
+        papel IN (_ascii'admin',_ascii'operador',_ascii'leitura')
+    ),
+    CONSTRAINT ck_auth_usuario_status CHECK (
+        status IN (_ascii'pendente',_ascii'ativo',_ascii'desativado')
+    ),
+    CONSTRAINT ck_auth_usuario_senha CHECK (
+        (senha_hash IS NULL) = (senha_pepper_versao IS NULL)
+        AND (status <> _ascii'ativo' OR senha_hash IS NOT NULL)
+    ),
+    CONSTRAINT ck_auth_usuario_totp CHECK (
+        (totp_segredo_cifrado IS NULL) = (totp_chave_versao IS NULL)
+        AND (totp_confirmado_em IS NULL OR totp_segredo_cifrado IS NOT NULL)
+    )
+);
+
+-- auth-1-schema-boundary: usuarios-created
+
+CREATE TABLE IF NOT EXISTS auth_sessoes (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    token_hash CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    usuario_id BIGINT UNSIGNED NOT NULL,
+    estagio VARCHAR(16) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    csrf_hash CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NULL,
+    tentativas_mfa INT UNSIGNED NOT NULL DEFAULT 0,
+    criada_em DATETIME(6) NOT NULL,
+    ultimo_uso_em DATETIME(6) NOT NULL,
+    expira_em DATETIME(6) NOT NULL,
+    revogada_em DATETIME(6) NULL,
+    motivo_revogacao VARCHAR(32) CHARACTER SET ascii COLLATE ascii_bin NULL,
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_auth_sessao_token (token_hash),
+    INDEX idx_auth_sessao_usuario (usuario_id, revogada_em),
+    INDEX idx_auth_sessao_expira (expira_em),
+    CONSTRAINT fk_auth_sessao_usuario FOREIGN KEY (usuario_id)
+        REFERENCES auth_usuarios(id) ON DELETE RESTRICT ON UPDATE RESTRICT,
+    CONSTRAINT ck_auth_sessao_estagio CHECK (
+        estagio IN (_ascii'mfa',_ascii'enrolamento',_ascii'completa')
+    ),
+    CONSTRAINT ck_auth_sessao_revogacao CHECK (
+        (revogada_em IS NULL) = (motivo_revogacao IS NULL)
+    )
+);
+
+-- auth-1-schema-boundary: sessoes-created
+
+CREATE TABLE IF NOT EXISTS auth_tokens_servico (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    nome VARCHAR(100) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+    papel VARCHAR(16) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    token_hash CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    criado_em DATETIME(6) NOT NULL,
+    expira_em DATETIME(6) NOT NULL,
+    revogado_em DATETIME(6) NULL,
+    ultimo_uso_em DATETIME(6) NULL,
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_auth_token_servico_hash (token_hash),
+    CONSTRAINT ck_auth_token_servico_papel CHECK (
+        papel IN (_ascii'operador',_ascii'leitura')
+    ),
+    CONSTRAINT ck_auth_token_servico_validade CHECK (expira_em > criado_em)
+);
+
+-- auth-1-schema-boundary: tokens-servico-created
+
+CREATE TABLE IF NOT EXISTS auth_tokens_uso_unico (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    usuario_id BIGINT UNSIGNED NOT NULL,
+    tipo VARCHAR(16) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    token_hash CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    criado_em DATETIME(6) NOT NULL,
+    expira_em DATETIME(6) NOT NULL,
+    usado_em DATETIME(6) NULL,
+    revogado_em DATETIME(6) NULL,
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_auth_token_uso_unico_hash (token_hash),
+    INDEX idx_auth_token_uso_unico_usuario (usuario_id, tipo),
+    CONSTRAINT fk_auth_token_uso_unico_usuario FOREIGN KEY (usuario_id)
+        REFERENCES auth_usuarios(id) ON DELETE RESTRICT ON UPDATE RESTRICT,
+    CONSTRAINT ck_auth_token_uso_unico_tipo CHECK (
+        tipo IN (_ascii'ativacao',_ascii'reset_senha',_ascii'reset_mfa')
+    ),
+    CONSTRAINT ck_auth_token_uso_unico_validade CHECK (expira_em > criado_em)
+);
+
+-- auth-1-schema-boundary: tokens-uso-unico-created
+
+-- Append-only audit: leaf without FK (actors may be anonymous or CLI).
+-- detalhe holds allowlisted keys only; phones and e-mails are masked.
+CREATE TABLE IF NOT EXISTS auth_auditoria (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    ocorrido_em DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    evento VARCHAR(48) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    resultado VARCHAR(16) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    ator_tipo VARCHAR(16) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    ator_id BIGINT UNSIGNED NULL,
+    ator_rotulo VARCHAR(100) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL,
+    alvo_tipo VARCHAR(32) CHARACTER SET ascii COLLATE ascii_bin NULL,
+    alvo_id VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NULL,
+    origem_ip VARCHAR(45) CHARACTER SET ascii COLLATE ascii_bin NULL,
+    detalhe JSON NULL,
+    PRIMARY KEY (id),
+    INDEX idx_auth_auditoria_data (ocorrido_em),
+    INDEX idx_auth_auditoria_ator (ator_tipo, ator_id, ocorrido_em),
+    CONSTRAINT ck_auth_auditoria_resultado CHECK (
+        resultado IN (_ascii'sucesso',_ascii'negado',_ascii'falha')
+    ),
+    CONSTRAINT ck_auth_auditoria_ator CHECK (
+        ator_tipo IN (_ascii'usuario',_ascii'token_servico',_ascii'cli',_ascii'anonimo')
+    )
+);
+
+-- auth-1-schema-boundary: auditoria-created
+
+DELIMITER $$
+
+-- Exact shape: columns (ordinal, type, signedness, nullability, default,
+-- charset/collation, extra), indexes, CHECK digests, FKs (target, columns,
+-- rules) and no trigger. NULL (absent object) fails closed; nothing is
+-- rewritten, repositioned or dropped to converge.
+DROP PROCEDURE IF EXISTS validate_auth_1_schema$$
+CREATE PROCEDURE validate_auth_1_schema()
+BEGIN
+    DECLARE actual_shape LONGTEXT DEFAULT NULL;
+    SET SESSION group_concat_max_len = 65535;
+
+    SELECT GROUP_CONCAT(CONCAT_WS('|', ordinal_position, column_name, column_type,
+        is_nullable, COALESCE(column_default, '<NULL>'),
+        COALESCE(character_set_name, '<NULL>'), COALESCE(collation_name, '<NULL>'), extra)
+        ORDER BY ordinal_position SEPARATOR ';') INTO actual_shape
+    FROM information_schema.columns
+    WHERE table_schema = DATABASE() AND table_name = 'auth_usuarios';
+    IF actual_shape IS NULL OR actual_shape <> CONCAT(
+        '1|id|bigint unsigned|NO|<NULL>|<NULL>|<NULL>|auto_increment;',
+        '2|email|varchar(254)|NO|<NULL>|utf8mb4|utf8mb4_bin|;',
+        '3|papel|varchar(16)|NO|<NULL>|ascii|ascii_bin|;',
+        '4|status|varchar(16)|NO|<NULL>|ascii|ascii_bin|;',
+        '5|senha_hash|varchar(255)|YES|<NULL>|ascii|ascii_bin|;',
+        '6|senha_pepper_versao|int unsigned|YES|<NULL>|<NULL>|<NULL>|;',
+        '7|totp_segredo_cifrado|varbinary(255)|YES|<NULL>|<NULL>|<NULL>|;',
+        '8|totp_chave_versao|int unsigned|YES|<NULL>|<NULL>|<NULL>|;',
+        '9|totp_confirmado_em|datetime(6)|YES|<NULL>|<NULL>|<NULL>|;',
+        '10|totp_ultimo_passo|bigint unsigned|YES|<NULL>|<NULL>|<NULL>|;',
+        '11|falhas_consecutivas|int unsigned|NO|0|<NULL>|<NULL>|;',
+        '12|bloqueios_consecutivos|int unsigned|NO|0|<NULL>|<NULL>|;',
+        '13|bloqueado_ate|datetime(6)|YES|<NULL>|<NULL>|<NULL>|;',
+        '14|criado_em|datetime(6)|NO|CURRENT_TIMESTAMP(6)|<NULL>|<NULL>|DEFAULT_GENERATED;',
+        '15|atualizado_em|datetime(6)|NO|CURRENT_TIMESTAMP(6)|<NULL>|<NULL>|DEFAULT_GENERATED on update CURRENT_TIMESTAMP(6)') THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'auth-1 auth_usuarios column shape requires audited repair';
+    END IF;
+    SELECT GROUP_CONCAT(CONCAT_WS('|', index_name, non_unique, seq_in_index, column_name,
+        COALESCE(collation, '<NULL>'), COALESCE(sub_part, '<NULL>'), index_type,
+        is_visible, COALESCE(expression, '<NULL>')) ORDER BY index_name, seq_in_index SEPARATOR ';')
+        INTO actual_shape FROM information_schema.statistics
+    WHERE table_schema = DATABASE() AND table_name = 'auth_usuarios';
+    IF actual_shape IS NULL OR actual_shape <> CONCAT(
+        'idx_auth_usuario_papel|1|1|papel|A|<NULL>|BTREE|YES|<NULL>;',
+        'idx_auth_usuario_papel|1|2|status|A|<NULL>|BTREE|YES|<NULL>;',
+        'PRIMARY|0|1|id|A|<NULL>|BTREE|YES|<NULL>;',
+        'uq_auth_usuario_email|0|1|email|A|<NULL>|BTREE|YES|<NULL>') THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'auth-1 auth_usuarios index shape requires audited repair';
+    END IF;
+    SELECT GROUP_CONCAT(CONCAT_WS('|', tc.constraint_name, tc.enforced, SHA2(cc.check_clause, 256))
+        ORDER BY tc.constraint_name SEPARATOR ';') INTO actual_shape
+    FROM information_schema.table_constraints AS tc
+    JOIN information_schema.check_constraints AS cc
+      ON cc.constraint_schema = tc.constraint_schema AND cc.constraint_name = tc.constraint_name
+    WHERE tc.constraint_schema = DATABASE() AND tc.table_name = 'auth_usuarios';
+    IF actual_shape IS NULL OR actual_shape <> CONCAT(
+        'ck_auth_usuario_papel|YES|2361b00422ece0f21e5b3547bdc4f6084aa8783f34d3222b8dda485289502a96;',
+        'ck_auth_usuario_senha|YES|ed4826c91ef61fac74ac2650f3f35e7b673856a0e57fcea3e5b7ba848215ce23;',
+        'ck_auth_usuario_status|YES|7bd4d72c3cc5d9a390d6cc74c89995531bdb65f0ffc1f15964bdf931485b7ea5;',
+        'ck_auth_usuario_totp|YES|dd66538ac9b4eca7321f02cb4d611022ed7eaec564e6c8fb6be8503a4f8cb409') THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'auth-1 auth_usuarios check shape requires audited repair';
+    END IF;
+
+    SELECT GROUP_CONCAT(CONCAT_WS('|', ordinal_position, column_name, column_type,
+        is_nullable, COALESCE(column_default, '<NULL>'),
+        COALESCE(character_set_name, '<NULL>'), COALESCE(collation_name, '<NULL>'), extra)
+        ORDER BY ordinal_position SEPARATOR ';') INTO actual_shape
+    FROM information_schema.columns
+    WHERE table_schema = DATABASE() AND table_name = 'auth_sessoes';
+    IF actual_shape IS NULL OR actual_shape <> CONCAT(
+        '1|id|bigint unsigned|NO|<NULL>|<NULL>|<NULL>|auto_increment;',
+        '2|token_hash|char(64)|NO|<NULL>|ascii|ascii_bin|;',
+        '3|usuario_id|bigint unsigned|NO|<NULL>|<NULL>|<NULL>|;',
+        '4|estagio|varchar(16)|NO|<NULL>|ascii|ascii_bin|;',
+        '5|csrf_hash|char(64)|YES|<NULL>|ascii|ascii_bin|;',
+        '6|tentativas_mfa|int unsigned|NO|0|<NULL>|<NULL>|;',
+        '7|criada_em|datetime(6)|NO|<NULL>|<NULL>|<NULL>|;',
+        '8|ultimo_uso_em|datetime(6)|NO|<NULL>|<NULL>|<NULL>|;',
+        '9|expira_em|datetime(6)|NO|<NULL>|<NULL>|<NULL>|;',
+        '10|revogada_em|datetime(6)|YES|<NULL>|<NULL>|<NULL>|;',
+        '11|motivo_revogacao|varchar(32)|YES|<NULL>|ascii|ascii_bin|') THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'auth-1 auth_sessoes column shape requires audited repair';
+    END IF;
+    SELECT GROUP_CONCAT(CONCAT_WS('|', index_name, non_unique, seq_in_index, column_name,
+        COALESCE(collation, '<NULL>'), COALESCE(sub_part, '<NULL>'), index_type,
+        is_visible, COALESCE(expression, '<NULL>')) ORDER BY index_name, seq_in_index SEPARATOR ';')
+        INTO actual_shape FROM information_schema.statistics
+    WHERE table_schema = DATABASE() AND table_name = 'auth_sessoes';
+    IF actual_shape IS NULL OR actual_shape <> CONCAT(
+        'idx_auth_sessao_expira|1|1|expira_em|A|<NULL>|BTREE|YES|<NULL>;',
+        'idx_auth_sessao_usuario|1|1|usuario_id|A|<NULL>|BTREE|YES|<NULL>;',
+        'idx_auth_sessao_usuario|1|2|revogada_em|A|<NULL>|BTREE|YES|<NULL>;',
+        'PRIMARY|0|1|id|A|<NULL>|BTREE|YES|<NULL>;',
+        'uq_auth_sessao_token|0|1|token_hash|A|<NULL>|BTREE|YES|<NULL>') THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'auth-1 auth_sessoes index shape requires audited repair';
+    END IF;
+    SELECT GROUP_CONCAT(CONCAT_WS('|', tc.constraint_name, tc.enforced, SHA2(cc.check_clause, 256))
+        ORDER BY tc.constraint_name SEPARATOR ';') INTO actual_shape
+    FROM information_schema.table_constraints AS tc
+    JOIN information_schema.check_constraints AS cc
+      ON cc.constraint_schema = tc.constraint_schema AND cc.constraint_name = tc.constraint_name
+    WHERE tc.constraint_schema = DATABASE() AND tc.table_name = 'auth_sessoes';
+    IF actual_shape IS NULL OR actual_shape <> CONCAT(
+        'ck_auth_sessao_estagio|YES|a3739b7700594b596147d4ea2642170e7f7ebfb82df9b2362ff0b5d42e8251da;',
+        'ck_auth_sessao_revogacao|YES|9e46fe24d90b49c15782de1137064da8e070a709738ec2b51f162e5ad4c816ee') THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'auth-1 auth_sessoes check shape requires audited repair';
+    END IF;
+
+    SELECT GROUP_CONCAT(CONCAT_WS('|', ordinal_position, column_name, column_type,
+        is_nullable, COALESCE(column_default, '<NULL>'),
+        COALESCE(character_set_name, '<NULL>'), COALESCE(collation_name, '<NULL>'), extra)
+        ORDER BY ordinal_position SEPARATOR ';') INTO actual_shape
+    FROM information_schema.columns
+    WHERE table_schema = DATABASE() AND table_name = 'auth_tokens_servico';
+    IF actual_shape IS NULL OR actual_shape <> CONCAT(
+        '1|id|bigint unsigned|NO|<NULL>|<NULL>|<NULL>|auto_increment;',
+        '2|nome|varchar(100)|NO|<NULL>|utf8mb4|utf8mb4_bin|;',
+        '3|papel|varchar(16)|NO|<NULL>|ascii|ascii_bin|;',
+        '4|token_hash|char(64)|NO|<NULL>|ascii|ascii_bin|;',
+        '5|criado_em|datetime(6)|NO|<NULL>|<NULL>|<NULL>|;',
+        '6|expira_em|datetime(6)|NO|<NULL>|<NULL>|<NULL>|;',
+        '7|revogado_em|datetime(6)|YES|<NULL>|<NULL>|<NULL>|;',
+        '8|ultimo_uso_em|datetime(6)|YES|<NULL>|<NULL>|<NULL>|') THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'auth-1 auth_tokens_servico column shape requires audited repair';
+    END IF;
+    SELECT GROUP_CONCAT(CONCAT_WS('|', index_name, non_unique, seq_in_index, column_name,
+        COALESCE(collation, '<NULL>'), COALESCE(sub_part, '<NULL>'), index_type,
+        is_visible, COALESCE(expression, '<NULL>')) ORDER BY index_name, seq_in_index SEPARATOR ';')
+        INTO actual_shape FROM information_schema.statistics
+    WHERE table_schema = DATABASE() AND table_name = 'auth_tokens_servico';
+    IF actual_shape IS NULL OR actual_shape <> CONCAT(
+        'PRIMARY|0|1|id|A|<NULL>|BTREE|YES|<NULL>;',
+        'uq_auth_token_servico_hash|0|1|token_hash|A|<NULL>|BTREE|YES|<NULL>') THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'auth-1 auth_tokens_servico index shape requires audited repair';
+    END IF;
+    SELECT GROUP_CONCAT(CONCAT_WS('|', tc.constraint_name, tc.enforced, SHA2(cc.check_clause, 256))
+        ORDER BY tc.constraint_name SEPARATOR ';') INTO actual_shape
+    FROM information_schema.table_constraints AS tc
+    JOIN information_schema.check_constraints AS cc
+      ON cc.constraint_schema = tc.constraint_schema AND cc.constraint_name = tc.constraint_name
+    WHERE tc.constraint_schema = DATABASE() AND tc.table_name = 'auth_tokens_servico';
+    IF actual_shape IS NULL OR actual_shape <> CONCAT(
+        'ck_auth_token_servico_papel|YES|67872f291e358f1c0fda1971f989e16c13e3f964314928c7b17a33daab170de5;',
+        'ck_auth_token_servico_validade|YES|2e20510a12c9dc8946c877a635a30e3690f4549305fb9e8dfe1bcad785641922') THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'auth-1 auth_tokens_servico check shape requires audited repair';
+    END IF;
+
+    SELECT GROUP_CONCAT(CONCAT_WS('|', ordinal_position, column_name, column_type,
+        is_nullable, COALESCE(column_default, '<NULL>'),
+        COALESCE(character_set_name, '<NULL>'), COALESCE(collation_name, '<NULL>'), extra)
+        ORDER BY ordinal_position SEPARATOR ';') INTO actual_shape
+    FROM information_schema.columns
+    WHERE table_schema = DATABASE() AND table_name = 'auth_tokens_uso_unico';
+    IF actual_shape IS NULL OR actual_shape <> CONCAT(
+        '1|id|bigint unsigned|NO|<NULL>|<NULL>|<NULL>|auto_increment;',
+        '2|usuario_id|bigint unsigned|NO|<NULL>|<NULL>|<NULL>|;',
+        '3|tipo|varchar(16)|NO|<NULL>|ascii|ascii_bin|;',
+        '4|token_hash|char(64)|NO|<NULL>|ascii|ascii_bin|;',
+        '5|criado_em|datetime(6)|NO|<NULL>|<NULL>|<NULL>|;',
+        '6|expira_em|datetime(6)|NO|<NULL>|<NULL>|<NULL>|;',
+        '7|usado_em|datetime(6)|YES|<NULL>|<NULL>|<NULL>|;',
+        '8|revogado_em|datetime(6)|YES|<NULL>|<NULL>|<NULL>|') THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'auth-1 auth_tokens_uso_unico column shape requires audited repair';
+    END IF;
+    SELECT GROUP_CONCAT(CONCAT_WS('|', index_name, non_unique, seq_in_index, column_name,
+        COALESCE(collation, '<NULL>'), COALESCE(sub_part, '<NULL>'), index_type,
+        is_visible, COALESCE(expression, '<NULL>')) ORDER BY index_name, seq_in_index SEPARATOR ';')
+        INTO actual_shape FROM information_schema.statistics
+    WHERE table_schema = DATABASE() AND table_name = 'auth_tokens_uso_unico';
+    IF actual_shape IS NULL OR actual_shape <> CONCAT(
+        'idx_auth_token_uso_unico_usuario|1|1|usuario_id|A|<NULL>|BTREE|YES|<NULL>;',
+        'idx_auth_token_uso_unico_usuario|1|2|tipo|A|<NULL>|BTREE|YES|<NULL>;',
+        'PRIMARY|0|1|id|A|<NULL>|BTREE|YES|<NULL>;',
+        'uq_auth_token_uso_unico_hash|0|1|token_hash|A|<NULL>|BTREE|YES|<NULL>') THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'auth-1 auth_tokens_uso_unico index shape requires audited repair';
+    END IF;
+    SELECT GROUP_CONCAT(CONCAT_WS('|', tc.constraint_name, tc.enforced, SHA2(cc.check_clause, 256))
+        ORDER BY tc.constraint_name SEPARATOR ';') INTO actual_shape
+    FROM information_schema.table_constraints AS tc
+    JOIN information_schema.check_constraints AS cc
+      ON cc.constraint_schema = tc.constraint_schema AND cc.constraint_name = tc.constraint_name
+    WHERE tc.constraint_schema = DATABASE() AND tc.table_name = 'auth_tokens_uso_unico';
+    IF actual_shape IS NULL OR actual_shape <> CONCAT(
+        'ck_auth_token_uso_unico_tipo|YES|5c08342b9bbc03ba48abac05d72d8c73d00a986ac82da13304f9d90527b06b06;',
+        'ck_auth_token_uso_unico_validade|YES|2e20510a12c9dc8946c877a635a30e3690f4549305fb9e8dfe1bcad785641922') THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'auth-1 auth_tokens_uso_unico check shape requires audited repair';
+    END IF;
+
+    SELECT GROUP_CONCAT(CONCAT_WS('|', ordinal_position, column_name, column_type,
+        is_nullable, COALESCE(column_default, '<NULL>'),
+        COALESCE(character_set_name, '<NULL>'), COALESCE(collation_name, '<NULL>'), extra)
+        ORDER BY ordinal_position SEPARATOR ';') INTO actual_shape
+    FROM information_schema.columns
+    WHERE table_schema = DATABASE() AND table_name = 'auth_auditoria';
+    IF actual_shape IS NULL OR actual_shape <> CONCAT(
+        '1|id|bigint unsigned|NO|<NULL>|<NULL>|<NULL>|auto_increment;',
+        '2|ocorrido_em|datetime(6)|NO|CURRENT_TIMESTAMP(6)|<NULL>|<NULL>|DEFAULT_GENERATED;',
+        '3|evento|varchar(48)|NO|<NULL>|ascii|ascii_bin|;',
+        '4|resultado|varchar(16)|NO|<NULL>|ascii|ascii_bin|;',
+        '5|ator_tipo|varchar(16)|NO|<NULL>|ascii|ascii_bin|;',
+        '6|ator_id|bigint unsigned|YES|<NULL>|<NULL>|<NULL>|;',
+        '7|ator_rotulo|varchar(100)|YES|<NULL>|utf8mb4|utf8mb4_bin|;',
+        '8|alvo_tipo|varchar(32)|YES|<NULL>|ascii|ascii_bin|;',
+        '9|alvo_id|varchar(64)|YES|<NULL>|ascii|ascii_bin|;',
+        '10|origem_ip|varchar(45)|YES|<NULL>|ascii|ascii_bin|;',
+        '11|detalhe|json|YES|<NULL>|<NULL>|<NULL>|') THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'auth-1 auth_auditoria column shape requires audited repair';
+    END IF;
+    SELECT GROUP_CONCAT(CONCAT_WS('|', index_name, non_unique, seq_in_index, column_name,
+        COALESCE(collation, '<NULL>'), COALESCE(sub_part, '<NULL>'), index_type,
+        is_visible, COALESCE(expression, '<NULL>')) ORDER BY index_name, seq_in_index SEPARATOR ';')
+        INTO actual_shape FROM information_schema.statistics
+    WHERE table_schema = DATABASE() AND table_name = 'auth_auditoria';
+    IF actual_shape IS NULL OR actual_shape <> CONCAT(
+        'idx_auth_auditoria_ator|1|1|ator_tipo|A|<NULL>|BTREE|YES|<NULL>;',
+        'idx_auth_auditoria_ator|1|2|ator_id|A|<NULL>|BTREE|YES|<NULL>;',
+        'idx_auth_auditoria_ator|1|3|ocorrido_em|A|<NULL>|BTREE|YES|<NULL>;',
+        'idx_auth_auditoria_data|1|1|ocorrido_em|A|<NULL>|BTREE|YES|<NULL>;',
+        'PRIMARY|0|1|id|A|<NULL>|BTREE|YES|<NULL>') THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'auth-1 auth_auditoria index shape requires audited repair';
+    END IF;
+    SELECT GROUP_CONCAT(CONCAT_WS('|', tc.constraint_name, tc.enforced, SHA2(cc.check_clause, 256))
+        ORDER BY tc.constraint_name SEPARATOR ';') INTO actual_shape
+    FROM information_schema.table_constraints AS tc
+    JOIN information_schema.check_constraints AS cc
+      ON cc.constraint_schema = tc.constraint_schema AND cc.constraint_name = tc.constraint_name
+    WHERE tc.constraint_schema = DATABASE() AND tc.table_name = 'auth_auditoria';
+    IF actual_shape IS NULL OR actual_shape <> CONCAT(
+        'ck_auth_auditoria_ator|YES|6314ae239335f4f41353c7eb61b21e96b82f5e3c901912fcba649f5156686e44;',
+        'ck_auth_auditoria_resultado|YES|2d2d39c3096742e0e2ff1a7a928b59cbd40cbf72b59c7fb101add8662b9928bf') THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'auth-1 auth_auditoria check shape requires audited repair';
+    END IF;
+
+    SELECT GROUP_CONCAT(CONCAT_WS('|', rc.constraint_name, rc.table_name, rc.referenced_table_name,
+        kcu.referenced_table_schema = rc.constraint_schema, rc.update_rule, rc.delete_rule,
+        kcu.column_name, kcu.referenced_column_name, kcu.ordinal_position)
+        ORDER BY rc.constraint_name, kcu.ordinal_position SEPARATOR ';') INTO actual_shape
+    FROM information_schema.referential_constraints AS rc
+    JOIN information_schema.key_column_usage AS kcu
+      ON kcu.constraint_schema = rc.constraint_schema AND kcu.constraint_name = rc.constraint_name
+     AND kcu.table_name = rc.table_name
+    WHERE rc.constraint_schema = DATABASE()
+      AND (rc.table_name LIKE 'auth\\_%' OR rc.referenced_table_name LIKE 'auth\\_%');
+    IF actual_shape IS NULL OR actual_shape <> CONCAT(
+        'fk_auth_sessao_usuario|auth_sessoes|auth_usuarios|1|RESTRICT|RESTRICT|usuario_id|id|1;',
+        'fk_auth_token_uso_unico_usuario|auth_tokens_uso_unico|auth_usuarios|1|RESTRICT|RESTRICT|usuario_id|id|1') THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'auth-1 foreign key shape requires audited repair';
+    END IF;
+    IF EXISTS (
+        SELECT 1 FROM information_schema.triggers
+        WHERE trigger_schema = DATABASE() AND event_object_table LIKE 'auth\\_%'
+    ) THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'auth-1 trigger shape requires audited repair';
+    END IF;
+END$$
+
+CALL validate_auth_1_schema()$$
+DROP PROCEDURE validate_auth_1_schema$$
+
+-- auth-1-schema-boundary: exact-schema-validated
+
+DELIMITER ;

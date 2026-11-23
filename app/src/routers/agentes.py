@@ -7,6 +7,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config import settings
+from src.services.auth.contexto import exigir_admin
 from src.database.connection import get_db
 from src.database import db_errors
 from src.database.repositories import (
@@ -91,7 +92,11 @@ class AgenteConsumoResponseSchema(BaseModel):
     percentual_franquia_mensal: Decimal | None
 
 
-router = APIRouter(prefix="/agentes", tags=["agentes"])
+# AUTH-1: every route of this router requires an authenticated admin;
+# a route added later inherits the guard (fail closed).
+router = APIRouter(
+    prefix="/agentes", tags=["agentes"], dependencies=[Depends(exigir_admin)]
+)
 
 
 def _inicio_mes_atual() -> datetime:

@@ -54,6 +54,7 @@ from src.database.repositories import (
 from src.database.unit_of_work import UnitOfWork
 from src.services import evolution_orchestrator, llm_client
 from src.services.turn_processor import TurnProcessor
+from tests import auth_fixtures
 
 
 TEST_DATABASE_URL = os.getenv("OUTBOX_TEST_DATABASE_URL")
@@ -1566,6 +1567,7 @@ class TurnProcessorMySQLTests(unittest.IsolatedAsyncioTestCase):
                 await session.commit()
 
         main.app.dependency_overrides[get_db] = db_override
+        auth_fixtures.autenticar_como(main.app)  # AUTH-1: admin principal
         try:
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=main.app), base_url="http://ticket04.test"
