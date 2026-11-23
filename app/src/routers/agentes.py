@@ -126,9 +126,23 @@ def _validar_modelo_llm(modelo_llm: str) -> None:
         raise HTTPException(status_code=422, detail="modelo_llm nao permitido para cadastro")
 
 
-@router.get("", response_model=list[AgenteResponseSchema], dependencies=[Depends(exigir(P.AGENTE_LER))])
-async def listar_agentes(db: AsyncSession = Depends(get_db)):
-    return await agente_repo.get_all(db)
+def _visivel(principal: Principal, agente) -> AgenteResponseSchema:
+    """Without sessao.ler_telefone (leitura) the legacy phone is masked too."""
+
+    resposta = AgenteResponseSchema.model_validate(agente)
+    if not pode(principal, P.SESSAO_LER_TELEFONE):
+        resposta = resposta.model_copy(
+            update={"numero_notificacao": auditoria.mascarar_telefone(resposta.numero_notificacao)}
+        )
+    return resposta
+
+
+@router.get("", response_model=list[AgenteResponseSchema])
+async def listar_agentes(
+    db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(exigir(P.AGENTE_LER)),
+):
+    return [_visivel(principal, agente) for agente in await agente_repo.get_all(db)]
 
 
 @router.post("", response_model=AgenteResponseSchema, status_code=status.HTTP_201_CREATED)
@@ -156,15 +170,16 @@ async def criar_agente(
     return agente
 
 
-@router.get("/{agente_id}", response_model=AgenteResponseSchema, dependencies=[Depends(exigir(P.AGENTE_LER))])
+@router.get("/{agente_id}", response_model=AgenteResponseSchema)
 async def detalhar_agente(
     agente_id: int,
     db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(exigir(P.AGENTE_LER)),
 ):
     agente = await agente_repo.get_by_id(db, agente_id)
     if not agente:
         raise HTTPException(status_code=404, detail="Agente nao encontrado")
-    return agente
+    return _visivel(principal, agente)
 
 
 @router.put("/{agente_id}", response_model=AgenteResponseSchema)

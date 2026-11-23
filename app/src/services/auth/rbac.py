@@ -28,7 +28,8 @@ class Permissao(str, Enum):
     AGENTE_EXCLUIR = "agente.excluir"
     CONSUMO_LER = "consumo.ler"
     SESSAO_LER = "sessao.ler"
-    # Without it every phone in a response is masked.
+    # Without it every phone in a response is masked (session phones and the
+    # agent's legacy numero_notificacao).
     SESSAO_LER_TELEFONE = "sessao.ler_telefone"
     SESSAO_TRANSFERIR = "sessao.transferir"
     SESSAO_RETOMAR = "sessao.retomar"

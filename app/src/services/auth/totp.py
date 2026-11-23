@@ -82,7 +82,9 @@ def uri(segredo: str, rotulo: str) -> str:
 def passo_aceito(segredo: str, codigo: object, *, agora: float | None = None) -> int | None:
     """Return the matching step within ±1 of now, or None. Constant-time compare."""
 
-    if not isinstance(codigo, str) or len(codigo) != DIGITOS or not codigo.isdigit():
+    # ASCII only: str.isdigit() accepts other Unicode digits, which
+    # hmac.compare_digest cannot compare (TypeError → 500).
+    if not isinstance(codigo, str) or len(codigo) != DIGITOS or not (codigo.isascii() and codigo.isdigit()):
         return None
     instante = time.time() if agora is None else agora
     gerador = pyotp.TOTP(segredo, digits=DIGITOS, interval=PERIODO)

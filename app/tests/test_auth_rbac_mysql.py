@@ -59,7 +59,7 @@ class AuthRbacMySQLTests(base.AuthApiMySQLTests):
             await db.execute(text("DELETE FROM mensagens"))
             await db.execute(text("DELETE FROM sessoes"))
             agente = Agente(nome="rbac sintetico", instance_name=f"rbac-{id(self)}", system_prompt="original",
-                            numero_notificacao="0", modelo_llm="openai/gpt-4o-mini")
+                            numero_notificacao=PHONE, modelo_llm="openai/gpt-4o-mini")
             db.add(agente)
             await db.flush()
             db.add(Sessao(agente_id=agente.id, telefone=PHONE, handler="bot"))
@@ -189,6 +189,15 @@ class AuthRbacMySQLTests(base.AuthApiMySQLTests):
             "admin": (PHONE, PHONE), "operador": (PHONE, PHONE), "t_operador": (PHONE, PHONE),
             "leitura": (MASKED, MASKED), "t_leitura": (MASKED, MASKED),
         })
+        # The agent's legacy numero_notificacao is a phone too (review finding).
+        for name, (client, headers) in principals.items():
+            listing = await client.get("/agentes", headers=headers)
+            detail = await client.get(f"/agentes/{agente_id}", headers=headers)
+            numbers = ([a["numero_notificacao"] for a in listing.json() if a["id"] == agente_id][0],
+                       detail.json()["numero_notificacao"])
+            self.assertEqual(numbers, (MASKED, MASKED) if name.endswith("leitura") else (PHONE, PHONE), name)
+            if name.endswith("leitura"):
+                self.assertNotIn(PHONE, listing.text + detail.text, name)
 
     def test_keyring_validation(self) -> None:
         from src import config
@@ -310,8 +319,21 @@ class AuthRbacMySQLTests(base.AuthApiMySQLTests):
         cookie = session.cookies.get("__Host-wpp_sessao")
         self.assertEqual((await self.client().post("/auth/totp/verificar", json={
             "desafio": cookie, "codigo": self.code(email)})).status_code, 401)
-        for bad in ("12345", "abcdef", "1234567", ""):
+        for bad in ("12345", "abcdef", "1234567", "", "１２３４５６", "١٢٣٤٥٦"):
             self.assertIsNone(totp.passo_aceito(self.totp_secrets[email], bad))
+        # Non-ASCII digits are an ordinary wrong code on both endpoints (review finding).
+        client, response = await self.login(email)
+        bad = await client.post("/auth/totp/verificar", json={"desafio": response.json()["desafio"],
+                                                              "codigo": "１２３４５６"})
+        self.assertEqual((bad.status_code, bad.json()), (401, {"detail": "codigo invalido"}))
+        async with self.sessions() as db:
+            attempts = (await db.execute(text("SELECT tentativas_mfa FROM auth_sessoes WHERE token_hash = :h"),
+                                         {"h": segredos.digest(response.json()["desafio"])})).scalar_one()
+        self.assertEqual(attempts, 1)
+        self.assertIn("mfa_falha", [r.evento for r in await self.audit_rows()])
+        confirm = await self.client().post("/auth/totp/confirmar", json={"desafio": response.json()["desafio"],
+                                                                         "codigo": "١٢٣٤٥٦"})
+        self.assertEqual(confirm.status_code, 401)
 
     async def test_totp_failures_count_toward_lockout(self) -> None:
         admin_id, email = await self.user("admin")
