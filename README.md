@@ -204,11 +204,11 @@ Runbook do scheduler de inbox: [`docs/inbox-scheduler-runbook.md`](docs/inbox-sc
 
 ### Autenticação
 
-Toda rota de `/agentes` e `/sessoes` exige sessão (cookie `__Host-wpp_sessao` + header `X-CSRF-Token` em mutações) ou `Authorization: Bearer` de token de serviço. Permissões por papel: [AGENTS.md §7](AGENTS.md#7-api-endpoints).
+Toda rota de `/agentes` e `/sessoes` exige sessão (cookie `__Host-wpp_sessao` + header `X-CSRF-Token` em mutações) ou `Authorization: Bearer` de token de serviço. Corpo de credencial com campo ausente/tipo errado → 422 sem ecoar valores e sem derivação de senha no login. Login com corpo válido recusado → 401 e uma derivação; janela por origem → 429; chaves ausentes, banco indisponível ou fila de hash saturada → 503. Demais erros por rota: [AGENTS.md §7](AGENTS.md#7-api-endpoints). Permissões por papel: [AGENTS.md §7](AGENTS.md#7-api-endpoints).
 
 | Método | Rota | Descrição |
 |---|---|---|
-| POST | `/auth/login` | E-mail + senha → sessão, ou desafio TOTP |
+| POST | `/auth/login` | E-mail + senha string → sessão ou desafio TOTP; credenciais recusadas → 401 genérico; corpo inválido → 422; limite por origem → 429; indisponibilidade → 503 |
 | POST | `/auth/totp/verificar` | Desafio + código TOTP → sessão |
 | POST | `/auth/totp/enrolar`, `/auth/totp/confirmar` | Enrolamento TOTP |
 | POST | `/auth/ativar` | Token de uso único (ativação, reset de senha ou de MFA) |

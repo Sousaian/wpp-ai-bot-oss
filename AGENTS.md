@@ -16,7 +16,7 @@ Vigência: 2026-11-19. Valem para pessoas e agentes (Traycer, Codex, Claude e ou
 4. **Licença:** Apache-2.0. Mantenha `LICENSE` e `NOTICE`. Nova dependência exige licença compatível com redistribuição Apache-2.0 (permissivas preferidas); dependência copyleft forte embutida no processo exige aprovação explícita. Serviços externos (Evolution, Chatwoot, MySQL) continuam sob as próprias licenças.
 5. **Posicionamento:** plataforma open source e self-hosted. Não reintroduzir linguagem de produto B2B/SaaS comercial nem roadmap comercial privado na documentação pública.
 6. **Arquitetura e compatibilidade:** persistir sessões em MySQL; atribuição e disponibilidade de atendentes ficam no Chatwoot. Preservar contratos dos modos direct, outbox e scheduler. Não retirar tabelas, campos ou valores de enum de compatibilidade sem migração explícita e auditada, com backup, restauração testada e validação em MySQL novo e existente. Coordenar SQL, ORM, API e testes conforme §5.6.
-7. **Testes obrigatórios antes de PR:** suíte completa `python -m unittest discover` com MySQL 8.0 descartável em rede interna (credenciais sintéticas), sem falhas. Linha de base atual: **818 testes OK**. Mudança de contrato de documentação atualiza o teste correspondente no mesmo PR. Testes que pulam por falta de MySQL não contam como aprovação.
+7. **Testes obrigatórios antes de PR:** suíte completa `python -m unittest discover` com MySQL 8.0 descartável em rede interna (credenciais sintéticas), sem falhas. Linha de base atual: **823 testes OK**. Mudança de contrato de documentação atualiza o teste correspondente no mesmo PR. Testes que pulam por falta de MySQL não contam como aprovação.
 8. **Planejamento interno** (tickets, specs, revisões e evidências) fica fora do repositório. A documentação pública resume decisões e estado sem depender desses artefatos.
 
 ## 1. Contexto do Projeto
@@ -474,7 +474,7 @@ Localização ACME em `/.well-known/acme-challenge/` existe na porta 80,
 mas Compose não monta webroot: provisionamento ACME exige mount/configuração
 operacional separada. Somente o harness de teste monta webroot sintético.
 CRUD de agentes/sessões é **interno**, somente `app:5000` na rede
-Docker. Nunca publicar porta do app; auth/RBAC permanece fora deste release.
+Docker. Nunca publicar porta do app; auth/RBAC da API implementado (§10.16), sem exposição pública.
 
 
 ### Webhook (Evolution API)
@@ -492,13 +492,24 @@ Docker. Nunca publicar porta do app; auth/RBAC permanece fora deste release.
 
 | Método | Rota | Descrição |
 |--------|------|-----------|
-| `POST` | `/auth/login` | `{email, senha}` → sessão (cookie `__Host-wpp_sessao` + `csrf_token` no corpo) ou, com TOTP confirmado, `{mfa_requerido: true, desafio}` sem cookie; falha sempre 401 genérico |
+| `POST` | `/auth/login` | `{email, senha}` → sessão (cookie `__Host-wpp_sessao` + `csrf_token` no corpo) ou, com TOTP confirmado, `{mfa_requerido: true, desafio}` sem cookie; credenciais recusadas em corpo válido → 401 genérico; corpo inválido → 422; limite por origem → 429; indisponibilidade → 503 |
 | `POST` | `/auth/totp/verificar` | `{desafio, codigo}` → sessão |
 | `POST` | `/auth/totp/enrolar` | Sessão sem TOTP (não admin): inicia enrolamento voluntário |
 | `POST` | `/auth/totp/confirmar` | `{desafio, codigo}` conclui enrolamento (ativação de admin, `reset_mfa` ou voluntário) |
 | `POST` | `/auth/ativar` | `{token, senha?}` consome token de uso único (`ativacao`, `reset_senha`, `reset_mfa`) |
 | `POST` | `/auth/logout` | Revoga a sessão do cookie (exige CSRF) |
 | `GET` | `/auth/me` | Identidade, papel e validade da credencial |
+
+
+Corpos das rotas de credencial usam validação 422 sem ecoar valores (campos/tipos).
+`/auth/totp/verificar` e `/auth/totp/confirmar`: código/desafio recusado → 401;
+`/auth/ativar`: token inválido → 400, senha recusada → 422.
+Login, verificar, confirmar e ativar têm limite por origem → 429 e exigem
+chaves/banco disponíveis → 503; fila de hash aplica-se a login/ativar → 503.
+Rotas autenticadas (`/auth/me`, `/auth/logout`, `/auth/totp/enrolar`):
+credencial ausente/inválida → 401; CSRF inválido em mutação por cookie → 403;
+chaves/banco indisponíveis → 503. Logout e enrolar recusam token de serviço → 400.
+Enrolar com TOTP já configurado → 409. Nenhuma dessas regras expõe `/auth` no Nginx.
 
 Permissões por rota (catálogo em `services/auth/rbac.py`):
 
@@ -2034,12 +2045,12 @@ Review round 1:
 - Sessão: 32 bytes aleatórios, banco guarda SHA-256; 30 min ocioso, 12 h absoluto; revogada por logout, CLI, troca de papel, desativação, reset de senha/MFA. Admin só valida com TOTP confirmado.
 - CSRF: mutação autenticada por cookie exige `X-CSRF-Token` igual ao emitido no login (comparação constante); Bearer não usa cookie ambiente e dispensa CSRF.
 - Senha: NFC, 8–64 caracteres, blocklist, sem composição; HMAC-SHA-256 com pepper versionado → argon2id `m=32 MiB, t=3, p=1`, fora de transação, em pool dedicado de 2 threads com fila de 16 e espera máxima de 5 s; excedente → 503 + `Retry-After`. Teto de memória de hash: 64 MiB, qualquer que seja a concorrência; `/webhook` não usa esse pool. Vaga pertence ao job até o worker consumi-lo: cancelar request não libera vaga nem cresce a fila; login saturado é recusado antes de consultar o banco. Hash gravado com custo acima de `CUSTO_MAXIMO` não verifica (`ERROR`; dono usa `reset_senha`). Rehash no login.
-- Login sem enumeração: e-mail inexistente, usuário pendente/desativado, origem em atraso, senha errada, admin sem TOTP e entrada malformada → mesma resposta 401 e exatamente uma derivação argon2id. Atraso por (conta, origem) em `auth_tentativas`: 5 falhas livres, depois 30 s dobrando até 15 min; zera com senha correta depois de vencido o atraso, 24 h sem falha ou CLI. Resíduo aceito: clientes do mesmo endereço (NAT, /64 IPv6) compartilham o atraso da conta, no máximo 15 min. Não existe bloqueio de conta por senha errada: terceiros não impedem o dono de entrar de outra origem; a cada 50 falhas seguidas da conta, somadas as origens, há `ERROR`. Limite por origem em memória por processo (30 tentativas/5 min por endpoint de credencial) → 429 + `Retry-After`.
+- Login sem enumeração: e-mail inexistente, usuário pendente/desativado, origem em atraso, senha errada, admin sem TOTP e valores malformados com `email` e `senha` string → mesma resposta 401 e exatamente uma derivação argon2id. Campo ausente ou tipo errado → 422 (só campo e tipo, sem ecoar valor), sem derivação. Chaves ausentes, banco indisponível ou fila de hash saturada → 503; essas recusas não garantem derivação. Atraso por (conta, origem) em `auth_tentativas`: 5 falhas livres, depois 30 s dobrando até 15 min; zera com senha correta depois de vencido o atraso, 24 h sem falha ou CLI. Resíduo aceito: clientes do mesmo endereço (NAT, /64 IPv6) compartilham o atraso da conta, no máximo 15 min. Não existe bloqueio de conta por senha errada: terceiros não impedem o dono de entrar de outra origem; a cada 50 falhas seguidas da conta, somadas as origens, há `ERROR`. Limite por origem em memória por processo (30 tentativas/5 min por endpoint de credencial) → 429 + `Retry-After`.
 - Origem: `X-Forwarded-For` só vale se o peer TCP for o proxy de `AUTH_TRUSTED_PROXY_HOST` (default `nginx`, resolvido pelo DNS do Docker, TTL 10 s) e trouxer exatamente um IP; Nginx sobrescreve o header com `$remote_addr` em todo bloco que fala com o app. `*`, listas e faixas são recusados no startup; falha de DNS, lista ou valor inválido → peer TCP. Uvicorn com `proxy_headers=False`. IPv6 é limitado por /64. Rate limit, atraso e auditoria usam essa origem. Prova: `scripts/run_auth_proxy_matrix.sh`.
 - TOTP: RFC 6238 SHA-1/6 dígitos/30 s, janela ±1, aceito só para passo maior que o último sob lock do usuário (anti-replay), 5 tentativas por desafio; 10 códigos errados seguidos bloqueiam só o segundo fator da conta por 15 min, dobrando até 1 h (exige senha correta antes); segredo AES-256-GCM com AAD da linha do usuário. Obrigatório para admin; ativação de admin fica `pendente` até confirmar TOTP; recuperação só por token `reset_mfa` emitido na CLI (sem "esqueci a senha").
 - RBAC: papéis fixos no código; toda rota de `/agentes`/`/sessoes` declara exatamente um `exigir(...)` e o guard do router recusa (403) rota sem declaração. Papel desconhecido não tem permissão. Tokens de serviço nunca são `admin` (contornariam o MFA).
 - Mascaramento: sem `sessao.ler_telefone` (`leitura`) todo `telefone` de sessão e o `numero_notificacao` legado do agente viram `5511*****0042` nas respostas. Conteúdo de mensagens do histórico e de `system_prompt` não é reescrito.
-- Auditoria: `auth_auditoria` com eventos e chaves allowlisted. Mutação de domínio grava o evento na mesma transação da mudança, depois dos locks (folha sem FK): sem auditoria, sem mudança. Login, MFA e negação de acesso usam transação própria; falha nela é sinalizada (contador + ERROR, limiar 1) sem alterar a resposta. Telefone/e-mail sempre mascarados.
+- Auditoria: `auth_auditoria` com eventos e chaves allowlisted. Mutação de domínio grava o evento na mesma transação da mudança, depois dos locks (folha sem FK): sem auditoria, sem mudança. Login com candidato conhecido e MFA gravam via `registrar` na mesma transação do resultado (`sessao.py`, apply): falha de auditoria aborta a transação → 503, sem contador isolado. Login que emite desafio MFA ainda não grava sucesso; sucesso é auditado na verificação TOTP. Enrolamento voluntário, confirmação TOTP, consumo válido de token de uso único e logout também auditam na transação da mudança; desafio/token inválido antes de mudar estado não gera evento. CLI: mutações de usuários/tokens auditam via `administracao._audit` na própria transação; listagens não geram evento. Rotas de domínio auditam criação/atualização/exclusão de agente e transferência/retomada/exclusão de sessão na UoW; leituras não geram evento. Só login sem candidato e negação RBAC (`rbac.exigir` e restrição de campos do PUT) usam `registrar_isolado`: falha de persistência sinaliza contador + ERROR, limiar 1, sem alterar a resposta. Telefone/e-mail sempre mascarados.
 - CLI container-only `python -m src.auth_cli`: `bootstrap-admin` (só sem nenhum admin; corrida serializada pelo range de índice), `usuario criar|listar|papel|desativar|reativar|desbloquear [--origem IP]|revogar-sessoes|reset --tipo senha|mfa|ativacao`, `token criar|listar|revogar`. Tokens exibidos uma vez em stdout. Último admin utilizável não pode ser rebaixado/desativado. `--actor` vai para a auditoria (`ator_tipo=cli`).
 - Perímetro: CLIs operacionais existentes (`delivery_cli`, `agent_scheduler_cli`, `provider_auth_cli`) e acesso ao container não passam por este login; acesso ao container continua privilegiado.
 
@@ -2383,7 +2394,12 @@ run/up e usa somente base release, com up --no-build e run --pull never (sem bin
 Operação CRUD somente pela rede Docker (sem ingress público):
 
 ```bash
-docker compose exec app python -c 'import httpx; r=httpx.get("http://127.0.0.1:5000/agentes"); r.raise_for_status(); print(r.status_code)'
+# Bash: token de serviço leitura/operador; não usar set -x nem imprimir ambiente.
+set +x
+read -rs -p 'Token de serviço: ' WPP_SERVICE_TOKEN; printf '\n'
+export WPP_SERVICE_TOKEN
+docker compose exec -T -e WPP_SERVICE_TOKEN app python -c 'import os, httpx; r=httpx.get("http://127.0.0.1:5000/agentes", headers={"Authorization": "Bearer " + os.environ["WPP_SERVICE_TOKEN"]}); r.raise_for_status(); print(r.status_code)'
+unset WPP_SERVICE_TOKEN
 ```
 
 Mesmo limite para `/sessoes*`, `/internal/*`, `/health/*` e docs.
