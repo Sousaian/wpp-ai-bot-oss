@@ -486,7 +486,9 @@ class AuthApiMySQLTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((refused.status_code, refused.json()), (401, {"detail": "credenciais invalidas"}))
         again = await self._attempt(usuario_id, attacker)
         self.assertEqual((again.falhas, again.liberado_em), (row.falhas, row.liberado_em))
-        # The owner, elsewhere, is never affected by the attacker.
+        # Accepted residual: another client on the same address shares the delay ...
+        self.assertEqual((await self.login(email, SENHA, attacker))[1].status_code, 401)
+        # ... but the owner, elsewhere, is never affected by the attacker.
         self.assertEqual((await self.login(email, SENHA, owner))[1].status_code, 200)
         # Delay elapsed: the next failure doubles it; the right password clears the row.
         for expected in (60, 120, 240, 480, 900, 900):
@@ -592,11 +594,18 @@ class AuthApiMySQLTests(unittest.IsolatedAsyncioTestCase):
                     await asyncio.to_thread(int)  # default executor is not the hashing pool
                 self.assertLess(webhook.status_code, 500, webhook.text)
                 self.assertEqual(sum(not t.done() for t in logins), capacity)
+                # Saturated logins are refused before touching the shared DB pool.
+                opened = []
+                main.app.dependency_overrides[contexto.get_auth_sessions] = lambda: (
+                    lambda: opened.append(1) or self.sessions())
+                late = (await self.login("tarde@example.invalid", source="198.51.100.240"))[1]
+                main.app.dependency_overrides[contexto.get_auth_sessions] = lambda: self.sessions
+                self.assertEqual((late.status_code, opened), (503, []))
             finally:
                 release.set()
             accepted = [r for _, r in await asyncio.gather(*logins)]
         self.assertEqual(sorted(r.status_code for r in accepted), [401] * capacity + [503] * 10)
-        self.assertEqual(pool.recusas, 10)
+        self.assertEqual(pool.recusas, 11)
 
     async def test_login_failures_are_indistinguishable(self) -> None:
         _, ativo = await self.user("operador", "ativo@example.invalid")
