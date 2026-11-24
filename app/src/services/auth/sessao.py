@@ -1,7 +1,7 @@
 """Login, logout and one-time-token activation/reset.
 
-Every login failure branch (unknown e-mail, pending/disabled user, locked
-account, wrong password, malformed input) runs exactly one argon2id
+Every login failure branch (unknown e-mail, pending/disabled user, delayed
+source, wrong password, malformed input) runs exactly one argon2id
 derivation and raises the same ``CredenciaisInvalidas``. Hashing always runs
 outside any DB transaction; the outcome is applied under the user row lock
 and revalidated against the hash that was actually verified.
@@ -14,10 +14,11 @@ import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
+from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.database.repositories import auth_repo
-from src.services.auth import limites, segredos, senha
+from src.services.auth import limites, origem, segredos, senha
 from src.services.auth.contexto import SESSAO_ABSOLUTA, run_auth_transaction
 
 
@@ -82,8 +83,46 @@ async def _emitir_sessao(db: AsyncSession, *, usuario_id: int, papel: str, agora
     return SessaoEmitida(token, csrf, expira_em, usuario_id, papel)
 
 
+async def avaliar_origem(db: AsyncSession, usuario, *, chave: str, agora: datetime, ok: bool) -> str | None:
+    """Delay decision for one (account, source); caller holds the user lock.
+
+    Returns None when the correct password may proceed, else the refusal
+    motive. A delayed source is refused even with the right password and its
+    attempts neither count nor extend the delay.
+    """
+
+    usuario_id = int(usuario.id)
+    registro = await auth_repo.lock_tentativa(db, usuario_id=usuario_id, origem=chave)
+    if registro is not None and limites.atrasado(registro.liberado_em, agora):
+        return "atrasado"
+    if ok:
+        if registro is not None:
+            await auth_repo.limpar_tentativas(db, usuario_id=usuario_id, origem=chave)
+        return None
+    recente = registro is not None and registro.ultima_falha_em > agora - limites.FALHAS_VALIDADE
+    falhas = (int(registro.falhas) if recente else 0) + 1
+    espera = limites.atraso(falhas)
+    if registro is None:
+        # Bounded growth: expired sources leave when a new one appears.
+        await auth_repo.limpar_tentativas(
+            db, usuario_id=usuario_id, antes_de=agora - limites.FALHAS_VALIDADE
+        )
+    await auth_repo.registrar_tentativa(
+        db, registro=registro, usuario_id=usuario_id, origem=chave, falhas=falhas, agora=agora,
+        liberado_em=agora + espera if espera else None,
+    )
+    usuario.falhas_consecutivas = int(usuario.falhas_consecutivas) + 1
+    if usuario.falhas_consecutivas % limites.SINAL_FALHAS_CONTA == 0:
+        logger.error(
+            "Auth account under repeated failures | usuario={} count={} threshold={}",
+            usuario_id, usuario.falhas_consecutivas, limites.SINAL_FALHAS_CONTA,
+        )
+    await db.flush()
+    return "atraso_aplicado" if espera else "credenciais"
+
+
 async def login(
-    sessions: async_sessionmaker[AsyncSession], *, email: object, senha_informada: object
+    sessions: async_sessionmaker[AsyncSession], *, email: object, senha_informada: object, origem_ip: str | None
 ) -> SessaoEmitida:
     try:
         canonico = canonicalizar_email(email)
@@ -113,21 +152,13 @@ async def login(
         if usuario is None or usuario.senha_hash != candidato.senha_hash:
             return None  # concurrent password change: the verified hash is stale
         agora = await auth_repo.agora(db)
-        if usuario.status != "ativo" or limites.bloqueado(usuario.bloqueado_ate, agora):
+        if usuario.status != "ativo":
             return None
-        if not verificacao.ok:
-            usuario.falhas_consecutivas = int(usuario.falhas_consecutivas) + 1
-            if usuario.falhas_consecutivas >= limites.FALHAS_ATE_BLOQUEIO:
-                usuario.bloqueado_ate = agora + limites.duracao_bloqueio(
-                    int(usuario.bloqueios_consecutivos)
-                )
-                usuario.bloqueios_consecutivos = int(usuario.bloqueios_consecutivos) + 1
-                usuario.falhas_consecutivas = 0
-            await db.flush()
+        if await avaliar_origem(
+            db, usuario, chave=origem.chave(origem_ip), agora=agora, ok=verificacao.ok
+        ) is not None:
             return None
         usuario.falhas_consecutivas = 0
-        usuario.bloqueios_consecutivos = 0
-        usuario.bloqueado_ate = None
         await db.flush()
         return await _emitir_sessao(db, usuario_id=int(usuario.id), papel=usuario.papel, agora=agora)
 
@@ -144,8 +175,8 @@ async def _rehash(
 ) -> None:
     try:
         novo_hash, versao = await senha.gerar_hash(texto)
-    except senha.SenhaRecusada:
-        return  # legacy password below the current policy: keep the old hash
+    except (senha.SenhaRecusada, senha.HashOcupado):
+        return  # legacy policy or saturated pool: keep the old hash, login stands
     await run_auth_transaction(
         sessions,
         lambda db: auth_repo.substituir_senha_se_inalterada(
@@ -212,9 +243,8 @@ async def usar_token(
         usuario.senha_pepper_versao = versao
         usuario.status = "ativo"
         usuario.falhas_consecutivas = 0
-        usuario.bloqueios_consecutivos = 0
-        usuario.bloqueado_ate = None
         await db.flush()
+        await auth_repo.limpar_tentativas(db, usuario_id=usuario_id)
         await auth_repo.revogar_sessoes_usuario(
             db, usuario_id=usuario_id, motivo="senha_redefinida", agora=agora
         )

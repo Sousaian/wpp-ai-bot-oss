@@ -9,6 +9,7 @@ synthetic data (``*.invalid`` e-mails). argon2 runs with a cheap cost here;
 from __future__ import annotations
 
 import asyncio
+import threading
 import os
 import re
 import unittest
@@ -25,17 +26,19 @@ from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
-from src import main
+from src import auth_cli, main
 from src.config import settings
 from src.database.connection import get_db
 from src.database.models import (
     AuthSessao,
+    AuthTentativa,
     AuthTokenServico,
     AuthTokenUsoUnico,
     AuthUsuario,
     Base,
 )
-from src.services.auth import administracao, contexto, limites, segredos, senha
+from src.database.unit_of_work import UnitOfWork
+from src.services.auth import administracao, contexto, limites, origem, segredos, senha
 from tests.disposable_db import assert_disposable_database
 
 
@@ -44,7 +47,8 @@ REPO_ROOT = Path(os.environ.get("WPP_REPO_ROOT", Path(__file__).resolve().parent
 PEPPER = {1: SecretStr("auth-test-pepper-synthetic-0123456789abcdef")}
 SENHA = "frase longa sintetica 42"
 BASE_URL = "https://auth.invalid"
-AUTH_TABLES = ("auth_auditoria", "auth_sessoes", "auth_tokens_uso_unico", "auth_tokens_servico", "auth_usuarios")
+PROXY_IP = "172.30.0.2"
+AUTH_TABLES = ("auth_auditoria", "auth_tentativas", "auth_sessoes", "auth_tokens_uso_unico", "auth_tokens_servico", "auth_usuarios")
 PRODUCTION_HASHER = senha.HASHER
 CHEAP = PasswordHasher(time_cost=1, memory_cost=8, parallelism=1, hash_len=32, salt_len=16, type=Type.ID)
 
@@ -92,6 +96,9 @@ class AuthApiMySQLTests(unittest.IsolatedAsyncioTestCase):
         self.patches.enter_context(patch.object(settings, "auth_password_pepper_current_version", 1))
         self.patches.enter_context(patch.object(senha, "HASHER", CHEAP))
         limites.LIMITE.reset()
+        # Trusted proxy as a literal address; other suites cover resolution.
+        self.patches.enter_context(patch.object(settings, "auth_trusted_proxy_host", PROXY_IP))
+        origem.PROXY.reset()
 
         async def db_override():
             async with self.sessions() as db:
@@ -130,9 +137,11 @@ class AuthApiMySQLTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.status_code, 200, response.text)
         return emitido.usuario_id, email
 
-    async def login(self, email: str, password: str = SENHA, source: str = "198.51.100.20"):
+    async def login(self, email: str, password: str = SENHA, source: str = "198.51.100.20",
+                    forwarded: str | None = None):
         client = self.client(source)
-        response = await client.post("/auth/login", json={"email": email, "senha": password})
+        headers = {"X-Forwarded-For": forwarded} if forwarded is not None else None
+        response = await client.post("/auth/login", json={"email": email, "senha": password}, headers=headers)
         return client, response
 
     async def logged(self, papel: str) -> tuple[httpx.AsyncClient, str, int]:
@@ -409,51 +418,174 @@ class AuthApiMySQLTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(limit.registrar("login", "a"))
         self.assertEqual(limit.recusas, 1)
 
-    async def test_account_lockout_progression(self) -> None:
+    async def test_one_client_behind_the_proxy_never_blocks_another(self) -> None:
+        """Nginx is the TCP peer of everybody: the window follows the real client."""
+
+        _, email = await self.user("operador")
+        limites.LIMITE.reset()
+        statuses = [(await self.login("nobody@example.invalid", source=PROXY_IP, forwarded="203.0.113.50"))[1].status_code
+                    for _ in range(limites.TENTATIVAS_POR_JANELA + 3)]
+        self.assertEqual(statuses, [401] * limites.TENTATIVAS_POR_JANELA + [429] * 3)
+        _, other = await self.login(email, source=PROXY_IP, forwarded="203.0.113.60")
+        self.assertEqual(other.status_code, 200)  # was 429 when the proxy address was the key
+
+        # A peer that is not the proxy cannot pick its own address.
+        limites.LIMITE.reset()
+        statuses = [(await self.login("nobody@example.invalid", source="198.51.100.77", forwarded=f"203.0.113.{n}"))[1].status_code
+                    for n in range(1, limites.TENTATIVAS_POR_JANELA + 2)]
+        self.assertEqual(statuses[-1], 429)
+        # Through the proxy, a list or garbage (never sent by Nginx) falls back to the peer.
+        limites.LIMITE.reset()
+        statuses = [(await self.login("nobody@example.invalid", source=PROXY_IP, forwarded=value))[1].status_code
+                    for n in range(limites.TENTATIVAS_POR_JANELA + 1)
+                    for value in [f"203.0.113.{n}, 203.0.113.9" if n % 2 else f"lixo-{n}"]]
+        self.assertEqual(statuses[-1], 429)
+
+    async def _attempt(self, usuario_id: int, source: str) -> AuthTentativa | None:
+        async with self.sessions() as db:
+            return (await db.execute(select(AuthTentativa).where(
+                AuthTentativa.usuario_id == usuario_id, AuthTentativa.origem == source))).scalar_one_or_none()
+
+    async def test_progressive_delay_is_per_account_and_source(self) -> None:
         usuario_id, email = await self.user("operador")
-        for _ in range(limites.FALHAS_ATE_BLOQUEIO):
-            self.assertEqual((await self.login(email, "senha errada 000"))[1].status_code, 401)
+        attacker, owner = "203.0.113.10", "203.0.113.11"
+        for _ in range(limites.FALHAS_LIVRES):
+            self.assertEqual((await self.login(email, "senha errada 000", attacker))[1].status_code, 401)
+        row = await self._attempt(usuario_id, attacker)
+        self.assertEqual(row.falhas, limites.FALHAS_LIVRES)
+        self.assertEqual(row.liberado_em - row.ultima_falha_em, timedelta(seconds=30))
+        # Delayed source: even the right password gets the generic answer and nothing is counted.
+        refused = (await self.login(email, SENHA, attacker))[1]
+        self.assertEqual((refused.status_code, refused.json()), (401, {"detail": "credenciais invalidas"}))
+        again = await self._attempt(usuario_id, attacker)
+        self.assertEqual((again.falhas, again.liberado_em), (row.falhas, row.liberado_em))
+        # The owner, elsewhere, is never affected by the attacker.
+        self.assertEqual((await self.login(email, SENHA, owner))[1].status_code, 200)
+        # Delay elapsed: the next failure doubles it; the right password clears the row.
+        for expected in (60, 120, 240, 480, 900, 900):
+            await self.execute(update(AuthTentativa).values(liberado_em=func.utc_timestamp(6) - text("INTERVAL 1 SECOND")))
+            await self.login(email, "senha errada 000", attacker)
+            row = await self._attempt(usuario_id, attacker)
+            self.assertEqual((row.liberado_em - row.ultima_falha_em).total_seconds(), expected)
+        await self.execute(update(AuthTentativa).values(liberado_em=func.utc_timestamp(6) - text("INTERVAL 1 SECOND")))
+        limites.LIMITE.reset()
+        self.assertEqual((await self.login(email, SENHA, attacker))[1].status_code, 200)
+        self.assertIsNone(await self._attempt(usuario_id, attacker))
+        self.assertEqual([limites.atraso(n).total_seconds() for n in (0, 4, 5, 6, 10, 500)], [0, 0, 30, 60, 900, 900])
+        # 24 h of silence restarts the count, and expired rows leave with the next new source.
+        for _ in range(limites.FALHAS_LIVRES):
+            await self.login(email, "senha errada 000", attacker)
+        await self.execute(update(AuthTentativa).values(
+            ultima_falha_em=func.utc_timestamp(6) - text("INTERVAL 25 HOUR"),
+            liberado_em=func.utc_timestamp(6) - text("INTERVAL 24 HOUR")))
+        await self.login(email, "senha errada 000", attacker)
+        self.assertEqual((await self._attempt(usuario_id, attacker)).falhas, 1)
+        await self.execute(update(AuthTentativa).values(ultima_falha_em=func.utc_timestamp(6) - text("INTERVAL 25 HOUR")))
+        await self.login(email, "senha errada 000", "203.0.113.12")
+        self.assertIsNone(await self._attempt(usuario_id, attacker))
+
+    async def test_third_parties_cannot_keep_the_owner_out(self) -> None:
+        usuario_id, email = await self.user("operador")
+        for n in range(12):
+            for _ in range(limites.FALHAS_LIVRES + 1):
+                await self.login(email, "senha errada 000", f"203.0.113.{100 + n}")
         async with self.sessions() as db:
             row = (await db.execute(select(AuthUsuario).where(AuthUsuario.id == usuario_id))).scalar_one()
-            now = (await db.execute(select(func.utc_timestamp(6)))).scalar_one()
-        self.assertEqual((row.falhas_consecutivas, row.bloqueios_consecutivos), (0, 1))
-        self.assertAlmostEqual((row.bloqueado_ate - now).total_seconds(), 900, delta=30)
-        # Correct password while locked: identical generic 401.
-        locked = (await self.login(email))[1]
-        self.assertEqual((locked.status_code, locked.json()), (401, {"detail": "credenciais invalidas"}))
-        # Lock elapsed: next lock doubles; success resets everything.
-        await self.execute(update(AuthUsuario).where(AuthUsuario.id == usuario_id)
-                           .values(bloqueado_ate=func.utc_timestamp(6) - text("INTERVAL 1 SECOND")))
-        for _ in range(limites.FALHAS_ATE_BLOQUEIO):
-            await self.login(email, "senha errada 000")
-        async with self.sessions() as db:
-            row = (await db.execute(select(AuthUsuario).where(AuthUsuario.id == usuario_id))).scalar_one()
-            now = (await db.execute(select(func.utc_timestamp(6)))).scalar_one()
-        self.assertEqual(row.bloqueios_consecutivos, 2)
-        self.assertAlmostEqual((row.bloqueado_ate - now).total_seconds(), 1800, delta=30)
-        self.assertEqual([limites.duracao_bloqueio(n) for n in (0, 1, 2, 6, 7, 30)],
-                         [timedelta(minutes=15), timedelta(minutes=30), timedelta(hours=1),
-                          timedelta(hours=16), timedelta(hours=24), timedelta(hours=24)])
-        await administracao.desbloquear(self.sessions, usuario_id=usuario_id)
-        self.assertEqual((await self.login(email))[1].status_code, 200)
-        async with self.sessions() as db:
-            row = (await db.execute(select(AuthUsuario).where(AuthUsuario.id == usuario_id))).scalar_one()
-        self.assertEqual((row.falhas_consecutivas, row.bloqueios_consecutivos, row.bloqueado_ate), (0, 0, None))
+        self.assertEqual(row.falhas_consecutivas, 12 * limites.FALHAS_LIVRES)
+        self.assertGreater(row.falhas_consecutivas, limites.SINAL_FALHAS_CONTA)
+        self.assertEqual((await self.login(email, SENHA, "198.51.100.200"))[1].status_code, 200)
+
+    async def test_concurrent_burst_cannot_outrun_the_delay(self) -> None:
+        usuario_id, email = await self.user("operador")
+        source = "203.0.113.20"
+        burst = await asyncio.gather(*[self.login(email, "senha errada 000", source) for _ in range(12)])
+        self.assertEqual({r.status_code for _, r in burst}, {401})
+        self.assertEqual((await self._attempt(usuario_id, source)).falhas, limites.FALHAS_LIVRES)
+        self.assertEqual((await self.login(email, SENHA, source))[1].status_code, 401)
+
+    async def test_cli_unlock_clears_delays(self) -> None:
+        usuario_id, email = await self.user("operador")
+        sources = ("203.0.113.30", "2001:db8:1:2::aa")
+        for source in sources:
+            for _ in range(limites.FALHAS_LIVRES):
+                await self.login(email, "senha errada 000", source)
+        listed = {u["id"]: u for u in await administracao.listar_usuarios(self.sessions)}[usuario_id]
+        self.assertEqual((listed["origens_atrasadas"], listed["totp_bloqueado"]), (2, False))
+        self.assertIsNotNone(await self._attempt(usuario_id, "2001:db8:1:2::/64"))
+        one = await administracao.desbloquear(self.sessions, usuario_id=usuario_id, origem="2001:db8:1:2::ffff")
+        self.assertEqual(one["origens_liberadas"], 1)
+        self.assertEqual((await self.login(email, SENHA, sources[1]))[1].status_code, 200)
+        self.assertEqual((await self.login(email, SENHA, sources[0]))[1].status_code, 401)
+        everything = await administracao.desbloquear(self.sessions, usuario_id=usuario_id)
+        self.assertEqual(everything["origens_liberadas"], 1)
+        self.assertEqual((await self.login(email, SENHA, sources[0]))[1].status_code, 200)
+        with self.assertRaises(administracao.Recusado):
+            await administracao.desbloquear(self.sessions, usuario_id=usuario_id, origem="nao-e-ip")
+        with self.assertRaises(administracao.Recusado):
+            await administracao.desbloquear(self.sessions, usuario_id=10**9)
+        args = auth_cli._parser().parse_args(["usuario", "desbloquear", str(usuario_id), "--actor", "op",
+                                              "--origem", "203.0.113.30"])
+        emitted: list[object] = []
+        self.assertEqual(await auth_cli.run(args, sessions=self.sessions, emit=emitted.append), 0)
+        self.assertEqual(emitted[0]["status"], "desbloqueado")
+
+    async def test_login_saturation_is_bounded_and_webhook_keeps_answering(self) -> None:
+        release, pool = threading.Event(), senha.PiscinaHash()
+
+        class Blocked(CountingHasher):
+            def verify(self, *args, **kwargs):
+                release.wait(30)
+                return super().verify(*args, **kwargs)
+
+        hasher = Blocked(time_cost=1, memory_cost=8, parallelism=1, hash_len=32, salt_len=16, type=Type.ID)
+        capacity = senha.WORKERS + senha.FILA_MAXIMA
+
+        async def uow_override():
+            async with UnitOfWork(self.sessions) as uow:
+                yield uow
+
+        main.app.dependency_overrides[main.get_unit_of_work] = uow_override
+        senha._dummy()
+        with patch.object(senha, "HASHER", hasher), patch.object(senha, "_dummy_hash", hasher.hash("x")), \
+             patch.object(senha, "PISCINA", pool), patch.object(senha, "ESPERA_MAXIMA", 30):
+            logins = [asyncio.create_task(self.login(f"n{n}@example.invalid", source=f"198.51.100.{n + 1}"))
+                      for n in range(capacity + 10)]
+            try:
+                async with asyncio.timeout(10):
+                    while sum(t.done() for t in logins) < 10:
+                        await asyncio.sleep(0.02)
+                rejected = [t.result()[1] for t in logins if t.done()]
+                self.assertEqual([(r.status_code, r.headers["retry-after"]) for r in rejected], [(503, "2")] * 10)
+                # Every hashing thread is busy: the webhook still reaches the DB and answers.
+                payload = {"event": "messages.upsert", "instance": "inexistente", "data": {
+                    "key": {"id": "sat-1", "remoteJid": "5511999990001@s.whatsapp.net", "fromMe": False},
+                    "message": {"conversation": "oi"}}}
+                async with asyncio.timeout(3):
+                    webhook = await self.client().post("/webhook", json=payload)
+                    await asyncio.to_thread(int)  # default executor is not the hashing pool
+                self.assertLess(webhook.status_code, 500, webhook.text)
+                self.assertEqual(sum(not t.done() for t in logins), capacity)
+            finally:
+                release.set()
+            accepted = [r for _, r in await asyncio.gather(*logins)]
+        self.assertEqual(sorted(r.status_code for r in accepted), [401] * capacity + [503] * 10)
+        self.assertEqual(pool.recusas, 10)
 
     async def test_login_failures_are_indistinguishable(self) -> None:
         _, ativo = await self.user("operador", "ativo@example.invalid")
         _, pendente = await self.user("leitura", "pendente@example.invalid", ativar=False)
         desativado_id, desativado = await self.user("leitura", "desativado@example.invalid")
         await administracao.alterar_status(self.sessions, usuario_id=desativado_id, ativo=False)
-        bloqueado_id, bloqueado = await self.user("leitura", "bloqueado@example.invalid")
-        await self.execute(update(AuthUsuario).where(AuthUsuario.id == bloqueado_id)
-                           .values(bloqueado_ate=func.utc_timestamp(6) + text("INTERVAL 1 HOUR")))
+        _, atrasado = await self.user("leitura", "atrasado@example.invalid")
+        for _ in range(limites.FALHAS_LIVRES):
+            await self.login(atrasado, "senha errada 000", "192.0.2.10")
+        limites.LIMITE.reset()
         cases = {
             "unknown": ("ninguem@example.invalid", SENHA),
             "wrong_password": (ativo, "senha errada 000"),
             "pending": (pendente, SENHA),
             "disabled": (desativado, SENHA),
-            "locked": (bloqueado, SENHA),
+            "delayed": (atrasado, SENHA),
             "malformed_email": ("not-an-email", SENHA),
             "oversized_password": (ativo, "x" * 5000),
             "case_variant_wrong": (ativo.upper(), "senha errada 000"),
@@ -464,7 +596,7 @@ class AuthApiMySQLTests(unittest.IsolatedAsyncioTestCase):
             senha._dummy()  # warm the dummy hash outside the measurement
             for name, (email, password) in cases.items():
                 counting.hashes = counting.verifies = 0
-                _, response = await self.login(email, password, source=f"192.0.2.{len(bodies) + 10}")
+                _, response = await self.login(email, password, source="192.0.2.10")
                 bodies.add((response.status_code, response.text, response.headers.get("set-cookie")))
                 self.assertEqual((counting.hashes, counting.verifies), (0, 1), name)
         self.assertEqual(bodies, {(401, '{"detail":"credenciais invalidas"}', None)})
@@ -501,10 +633,10 @@ class AuthApiMySQLTests(unittest.IsolatedAsyncioTestCase):
     async def test_production_hash_parameters(self) -> None:
         hasher = PRODUCTION_HASHER
         self.assertEqual((hasher.memory_cost, hasher.time_cost, hasher.parallelism, hasher.salt_len, hasher.type),
-                         (65536, 3, 4, 16, Type.ID))
+                         (32768, 3, 1, 16, Type.ID))
         with patch.object(senha, "HASHER", PRODUCTION_HASHER):
             stored, versao = await senha.gerar_hash(SENHA)
-            self.assertTrue(stored.startswith("$argon2id$v=19$m=65536,t=3,p=4$"))
+            self.assertTrue(stored.startswith("$argon2id$v=19$m=32768,t=3,p=1$"))
             self.assertEqual(versao, 1)
             self.assertTrue((await senha.verificar(SENHA, stored, 1)).ok)
             self.assertFalse((await senha.verificar(SENHA + "x", stored, 1)).ok)

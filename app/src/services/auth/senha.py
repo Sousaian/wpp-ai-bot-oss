@@ -5,6 +5,13 @@ with an older version or older argon2 parameters is rehashed on login. Every
 verification runs exactly one argon2id derivation with the current cost,
 including the branches without a usable hash (dummy hash), so login failure
 branches are not distinguishable by work performed.
+
+Derivations run on a dedicated pool of ``WORKERS`` threads with a bounded
+queue, never on the event loop nor on the default executor: hashing memory is
+capped at ``WORKERS`` × 32 MiB whatever the number of concurrent logins, and
+/webhook keeps its own threads. Beyond the queue, or after ``ESPERA_MAXIMA``
+seconds waiting, the caller gets ``HashOcupado`` (503), identically on every
+login branch.
 """
 
 from __future__ import annotations
@@ -12,11 +19,14 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import threading
 import unicodedata
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 
 from argon2 import PasswordHasher, Type
 from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
+from loguru import logger
 
 from src.config import settings
 
@@ -24,10 +34,14 @@ from src.config import settings
 SENHA_MIN = 8
 SENHA_MAX = 64
 
-# argon2id m=64 MiB, t=3, p=4, 16-byte salt, 32-byte digest (PHC string).
+# argon2id m=32 MiB, t=3, p=1, 16-byte salt, 32-byte digest (PHC string):
+# ~45 ms on one vCPU and above OWASP's 19 MiB/t=2 and 12 MiB/t=3 minimums.
 HASHER = PasswordHasher(
-    time_cost=3, memory_cost=65536, parallelism=4, hash_len=32, salt_len=16, type=Type.ID
+    time_cost=3, memory_cost=32768, parallelism=1, hash_len=32, salt_len=16, type=Type.ID
 )
+WORKERS = 2
+FILA_MAXIMA = 16
+ESPERA_MAXIMA = 5.0
 
 # Small blocklist of common choices; long, unique passphrases are preferred.
 BLOCKLIST = frozenset({
@@ -48,6 +62,58 @@ class SenhaRecusada(ValueError):
 
 class PepperIndisponivel(RuntimeError):
     """The keyring cannot hash or verify (auth not provisioned)."""
+
+
+class HashOcupado(RuntimeError):
+    """Hashing capacity exhausted; retry later (503)."""
+
+
+class PiscinaHash:
+    """Dedicated pool with bounded admission.
+
+    A slot belongs to the worker job, not to the request: cancelling a request
+    never frees a slot whose thread is still hashing.
+    """
+
+    def __init__(self, workers: int = WORKERS, fila: int = FILA_MAXIMA) -> None:
+        self._executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="auth-hash")
+        self._capacidade = workers + fila
+        self._ativos = 0
+        self._lock = threading.Lock()
+        self.recusas = 0
+
+    def _liberar(self, _futuro: Future) -> None:
+        with self._lock:
+            self._ativos -= 1
+
+    def _recusar(self) -> HashOcupado:
+        self.recusas += 1
+        logger.error("Auth hashing saturated | count={} threshold=1", self.recusas)
+        return HashOcupado("auth hashing saturated")
+
+    async def executar(self, funcao, *args):
+        with self._lock:
+            if self._ativos >= self._capacidade:
+                recusado = True
+            else:
+                recusado = False
+                self._ativos += 1
+        if recusado:
+            raise self._recusar()
+        try:
+            futuro = self._executor.submit(funcao, *args)
+        except BaseException:
+            with self._lock:
+                self._ativos -= 1
+            raise
+        futuro.add_done_callback(self._liberar)
+        try:
+            return await asyncio.wait_for(asyncio.wrap_future(futuro), ESPERA_MAXIMA)
+        except asyncio.TimeoutError:
+            raise self._recusar() from None
+
+
+PISCINA = PiscinaHash()
 
 
 @dataclass(frozen=True)
@@ -139,7 +205,7 @@ async def gerar_hash(senha: str) -> tuple[str, int]:
 
     normalizada = normalizar(senha)
     _pepper(settings.auth_password_pepper_current_version)
-    return await asyncio.to_thread(_hash_sync, normalizada)
+    return await PISCINA.executar(_hash_sync, normalizada)
 
 
 async def verificar(
@@ -148,4 +214,4 @@ async def verificar(
     """Exactly one argon2id derivation on every branch; runs off-loop."""
 
     _pepper(settings.auth_password_pepper_current_version)
-    return await asyncio.to_thread(_verify_sync, senha, senha_hash, versao)
+    return await PISCINA.executar(_verify_sync, senha, senha_hash, versao)

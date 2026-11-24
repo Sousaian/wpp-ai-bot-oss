@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.database.models import AUTH_PAPEIS, AUTH_PAPEIS_TOKEN_SERVICO
 from src.database.repositories import auth_repo
+from src.services.auth import origem as origem_rede
 from src.services.auth import segredos
 from src.services.auth.contexto import run_auth_transaction
 from src.services.auth.sessao import (
@@ -191,16 +192,29 @@ async def emitir_reset(
     return await run_auth_transaction(sessions, op)
 
 
-async def desbloquear(sessions: async_sessionmaker[AsyncSession], *, usuario_id: int) -> dict[str, object]:
+async def desbloquear(
+    sessions: async_sessionmaker[AsyncSession], *, usuario_id: int, origem: str | None = None
+) -> dict[str, object]:
+    """Clear every login delay and the TOTP lock, or one source's delay only."""
+
+    chave = None
+    if origem is not None:
+        chave = origem_rede.chave(origem)
+        if chave == origem_rede.DESCONHECIDA:
+            raise Recusado("origem_invalida")
+
     async def op(db: AsyncSession) -> dict[str, object]:
         usuario = await auth_repo.lock_usuario(db, usuario_id)
         if usuario is None:
             raise Recusado("usuario_inexistente")
-        usuario.falhas_consecutivas = 0
-        usuario.bloqueios_consecutivos = 0
-        usuario.bloqueado_ate = None
-        await db.flush()
-        return {"usuario_id": usuario_id, "status": "desbloqueado"}
+        if chave is None:
+            usuario.falhas_consecutivas = 0
+            usuario.totp_falhas = 0
+            usuario.totp_bloqueios = 0
+            usuario.totp_bloqueado_ate = None
+            await db.flush()
+        removidas = await auth_repo.limpar_tentativas(db, usuario_id=usuario_id, origem=chave)
+        return {"usuario_id": usuario_id, "status": "desbloqueado", "origens_liberadas": removidas}
 
     return await run_auth_transaction(sessions, op)
 
@@ -222,11 +236,13 @@ async def revogar_sessoes(sessions: async_sessionmaker[AsyncSession], *, usuario
 async def listar_usuarios(sessions: async_sessionmaker[AsyncSession]) -> list[dict[str, object]]:
     async def op(db: AsyncSession) -> list[dict[str, object]]:
         agora = await auth_repo.agora(db)
+        atrasos = await auth_repo.contar_atrasos(db, agora=agora)
         return [
             {
                 "id": int(u.id), "email": u.email, "papel": u.papel, "status": u.status,
                 "mfa_ativo": u.totp_confirmado_em is not None,
-                "bloqueado": bool(u.bloqueado_ate and u.bloqueado_ate > agora),
+                "origens_atrasadas": atrasos.get(int(u.id), 0),
+                "totp_bloqueado": bool(u.totp_bloqueado_ate and u.totp_bloqueado_ate > agora),
             }
             for u in await auth_repo.listar_usuarios(db)
         ]

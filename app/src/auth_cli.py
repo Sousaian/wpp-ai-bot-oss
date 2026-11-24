@@ -58,6 +58,8 @@ def _parser() -> argparse.ArgumentParser:
         action = usuarios.add_parser(name)
         action.add_argument("usuario_id", type=int)
         action.add_argument("--actor", required=True, type=_nonblank)
+        if name == "desbloquear":
+            action.add_argument("--origem", type=_nonblank, help="clear one client IP only")
     reset = usuarios.add_parser("reset")
     reset.add_argument("usuario_id", type=int)
     reset.add_argument("--tipo", required=True, choices=sorted(administracao.TIPOS_RESET))
@@ -101,7 +103,8 @@ async def run(args: argparse.Namespace, sessions=AsyncSessionLocal, emit=_emit) 
                 emit(await administracao.alterar_status(
                     sessions, usuario_id=args.usuario_id, ativo=command == "reativar"))
             elif command == "desbloquear":
-                emit(await administracao.desbloquear(sessions, usuario_id=args.usuario_id))
+                emit(await administracao.desbloquear(
+                    sessions, usuario_id=args.usuario_id, origem=args.origem))
             elif command == "revogar-sessoes":
                 emit(await administracao.revogar_sessoes(sessions, usuario_id=args.usuario_id))
             else:
