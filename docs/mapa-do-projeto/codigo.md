@@ -36,7 +36,7 @@ Base `main` = `dev` = `5908a94`, snapshot documental de 2026-11-09: F0 integrado
 | [services/evolution_client.py](../../app/src/services/evolution_client.py) | HTTP multi-instância, mensagens/presença |
 | [services/chatwoot_client.py](../../app/src/services/chatwoot_client.py) | Contatos, conversas, mensagens e contrato provider |
 | [services/webhook_auth.py](../../app/src/services/webhook_auth.py) | Bearer Evolution e criptografia dos callbacks Chatwoot |
-| [services/auth/](../../app/src/services/auth/) | `contexto` (credencial/CSRF), `rbac` (papéis/permissões), `senha` (argon2id+pepper), `sessao` (login/TOTP/tokens), `totp`, `limites`, `auditoria`, `administracao` (CLI) |
+| [services/auth/](../../app/src/services/auth/) | `contexto` (credencial/CSRF), `origem` (IP real atrás do proxy), `rbac` (papéis/permissões), `senha` (argon2id+pepper), `sessao` (login/TOTP/tokens), `totp`, `limites`, `auditoria`, `administracao` (CLI) |
 | [services/provider_auth_bootstrap.py](../../app/src/services/provider_auth_bootstrap.py) | Instalação/auditoria/probes e snapshot provider |
 | [services/handoff_manager.py](../../app/src/services/handoff_manager.py) | Handoff compatível direct/outbox não agendado |
 | [services/delivery_adapters.py](../../app/src/services/delivery_adapters.py) | Decoders/payloads e operações remotas versionadas |

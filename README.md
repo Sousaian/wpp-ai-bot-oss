@@ -84,7 +84,7 @@ Diagrama de integrações, não de uma única transação:
 ## Segurança e limites conhecidos
 
 - CRUD `/agentes` e `/sessoes` exige login no app (401 sem credencial, 403 sem permissão, 503 sem chaves `AUTH_*`) e continua bloqueado pelo Nginx. `/auth/*` também é interno; expor qualquer dessas rotas é decisão separada. Não publicar `app:5000` nem criar proxy alternativo.
-- Rate limit de login por origem é em memória por processo; o controle durável é o bloqueio por conta. Acesso ao container (CLIs) continua privilegiado e fora do login.
+- Rate limit de login por origem é em memória por processo; o controle durável é o atraso progressivo por conta e origem, que não deixa terceiros bloquearem o dono. Quem distribui tentativas por muitas origens só é contido pelos limites por origem e pela fila de hash; TOTP é recomendado também para operadores. Acesso ao container (CLIs) continua privilegiado e fora do login.
 - `PROVIDER_WEBHOOK_AUTH_MODE=provisioning` é bootstrap, não modo público seguro. Ingress fechado até contratos verificados e auth `enforced`.
 - App não publica porta `5000` no host. Diagnóstico interno não é API pública.
 - Crash/rollback pós-LLM pode perder ledger no fluxo não agendado, inclusive outbox; plano pós-F0 aprovado prevê scheduler antes de tráfego comercial, ainda sem ativação.

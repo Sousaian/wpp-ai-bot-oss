@@ -9,7 +9,7 @@ from fastapi.routing import APIRoute
 
 from src import main
 from src.config import Settings
-from src.services.auth import auditoria, contexto, limites, rbac, senha, totp
+from src.services.auth import auditoria, contexto, limites, origem, rbac, senha, totp
 from src.services.auth.rbac import Permissao as P
 
 
@@ -19,6 +19,7 @@ AUTH_ENV = (
     "AUTH_PASSWORD_PEPPER_KEYS={}",
     "AUTH_TOTP_ENCRYPTION_CURRENT_VERSION=1",
     "AUTH_TOTP_ENCRYPTION_KEYS={}",
+    "AUTH_TRUSTED_PROXY_HOST=nginx",
 )
 
 
@@ -87,11 +88,19 @@ class AuthDocsContractTests(unittest.TestCase):
                          (1800, 43200))
         self.assertIn("30 min ocioso, 12 h absoluto", section_10_16)
         hasher = senha.HASHER
-        self.assertIn(f"argon2id `m=64 MiB, t={hasher.time_cost}, p={hasher.parallelism}`", section_10_16)
-        self.assertEqual(hasher.memory_cost, 64 * 1024)
+        self.assertIn(f"argon2id `m={hasher.memory_cost // 1024} MiB, t={hasher.time_cost}, p={hasher.parallelism}`", section_10_16)
+        self.assertEqual(hasher.memory_cost, 32 * 1024)
+        self.assertIn(f"pool dedicado de {senha.WORKERS} threads com fila de {senha.FILA_MAXIMA} "
+                      f"e espera máxima de {senha.ESPERA_MAXIMA:.0f} s", section_10_16)
+        self.assertIn(f"Teto de memória de hash: {senha.WORKERS * hasher.memory_cost // 1024} MiB", section_10_16)
+        self.assertIn(f"TTL {origem.RESOLUCAO_TTL_SEGUNDOS:.0f} s", section_10_16)
         self.assertIn(f"{senha.SENHA_MIN}–{senha.SENHA_MAX} caracteres", section_10_16)
-        self.assertIn(f"{limites.FALHAS_ATE_BLOQUEIO} falhas (senha ou TOTP) → 15 min, dobrando até 24 h",
-                      section_10_16)
+        self.assertIn(f"{limites.FALHAS_LIVRES} falhas livres, depois {limites.ATRASO_BASE.seconds} s dobrando "
+                      f"até {limites.ATRASO_MAXIMO.seconds // 60} min", section_10_16)
+        self.assertIn(f"a cada {limites.SINAL_FALHAS_CONTA} falhas seguidas", section_10_16)
+        self.assertIn(f"{limites.TOTP_FALHAS_ATE_BLOQUEIO} códigos errados seguidos bloqueiam só o segundo fator "
+                      f"da conta por 15 min, dobrando até 1 h", section_10_16)
+        self.assertEqual([limites.bloqueio_totp(n).total_seconds() for n in (0, 1, 2, 9)], [900, 1800, 3600, 3600])
         self.assertIn(f"{limites.TENTATIVAS_POR_JANELA} tentativas/5 min", section_10_16)
         self.assertEqual(limites.JANELA_SEGUNDOS, 300)
         self.assertIn(f"janela ±{totp.JANELA}", section_10_16)

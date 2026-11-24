@@ -49,7 +49,8 @@ Tabelas presentes não autorizam intake/dispatch. Schema esperado é `3`, valida
 
 | Tabela | Fato persistido |
 | --- | --- |
-| `auth_usuarios` | E-mail canônico único, papel fixo, status, hash argon2id+pepper, TOTP cifrado e contadores de bloqueio |
+| `auth_usuarios` | E-mail canônico único, papel fixo, status, hash argon2id+pepper, TOTP cifrado e bloqueio curto do segundo fator |
+| `auth_tentativas` | Falhas e atraso progressivo por usuário e origem |
 | `auth_sessoes` | Hash da sessão opaca/desafio TOTP, estágio, hash CSRF, validade e revogação |
 | `auth_tokens_servico` | Hash do token Bearer, papel não-admin, expiração e revogação |
 | `auth_tokens_uso_unico` | Hash de ativação/reset entregue fora do sistema, validade e uso único |

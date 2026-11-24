@@ -183,6 +183,7 @@ Chatwoot → `routers/chatwoot.py` → auth conforme modo → `services/chatwoot
 | `docker-compose.provider-auth-validation.yml` | Stack de prova dos contratos provider; não configuração de produção |
 | `.env.example`, `app/.env.example` | Templates públicos; nunca usar placeholders como segredos reais |
 | `scripts/` | Matrizes, mutações, probes e provisionamento |
+| `scripts/run_auth_proxy_matrix.sh` | Nginx, app e MySQL reais: origem do cliente, forja de header, rajada de login e `/webhook` |
 | `scripts/run_auth_schema_mysql_matrix.sh` | Migration auth: MySQL novo, reaplicação, existente com dados e shapes divergentes |
 | `nginx/`, `chatwoot/` | Borda, privacidade de logs e checks Rails |
 | `tests/provider_contracts/` | Provas auxiliares dos contratos Evolution/Chatwoot |
@@ -409,8 +410,9 @@ Folhas aditivas no fim de `db/init.sql`; nenhuma tabela existente ganha coluna, 
 
 | Tabela | Conteúdo | Regras |
 | --- | --- | --- |
-| `auth_usuarios` | e-mail canônico (UNIQUE global), `papel`, `status` (`pendente`/`ativo`/`desativado`), hash argon2id + versão do pepper, TOTP cifrado + versão da chave + confirmação + último passo, falhas/bloqueios/`bloqueado_ate` | Nunca apagado (desativar); `ativo` exige hash |
+| `auth_usuarios` | e-mail canônico (UNIQUE global), `papel`, `status` (`pendente`/`ativo`/`desativado`), hash argon2id + versão do pepper, TOTP cifrado + versão da chave + confirmação + último passo, contador de falhas (só sinal) e bloqueio curto do segundo fator | Nunca apagado (desativar); `ativo` exige hash |
 | `auth_sessoes` | SHA-256 do token, `estagio` (`completa`/`mfa`/`enrolamento`), SHA-256 do CSRF, tentativas, criação/uso/expiração/revogação | FK RESTRICT → usuário; desafios TOTP vivem aqui com estágio próprio |
+| `auth_tentativas` | falhas, última falha e `liberado_em` por (usuário, origem) | Atraso progressivo; nunca bloqueia outras origens; expira após 24 h |
 | `auth_tokens_servico` | nome, papel `operador`/`leitura`, SHA-256, expiração, revogação, último uso | CHECK proíbe `admin` |
 | `auth_tokens_uso_unico` | `ativacao`/`reset_senha`/`reset_mfa`, SHA-256, expiração, uso, revogação | FK RESTRICT → usuário; novo token revoga os não usados |
 | `auth_auditoria` | evento, resultado, ator (`usuario`/`token_servico`/`cli`/`anonimo`), alvo, IP de origem, `detalhe` JSON | Folha sem FK; eventos e chaves allowlisted; telefone/e-mail mascarados |
@@ -835,11 +837,13 @@ AUTH_PASSWORD_PEPPER_CURRENT_VERSION=1
 AUTH_PASSWORD_PEPPER_KEYS={}
 AUTH_TOTP_ENCRYPTION_CURRENT_VERSION=1
 AUTH_TOTP_ENCRYPTION_KEYS={}
+AUTH_TRUSTED_PROXY_HOST=nginx
 ```
 
 - `AUTH_PASSWORD_PEPPER_KEYS`: JSON versionado, cada segredo ≥ 32 caracteres, nunca placeholder (`replace-*`, `change-me*`, `sua-*`, `gere-*`).
 - `AUTH_TOTP_ENCRYPTION_KEYS`: JSON versionado, cada valor base64 de exatamente 32 bytes (AES-256-GCM).
 - Mapa vazio (default dos templates) mantém `/agentes`, `/sessoes` e `/auth` fechados (503) e a CLI de auth recusa operar. Mapa inválido falha no startup sem imprimir valores.
+- `AUTH_TRUSTED_PROXY_HOST`: um host ou IP literal; vazio não confia em ninguém (§10.16).
 - Rotação: adicionar versão nova e torná-la corrente, mantendo as anteriores. Pepper antigo é substituído por rehash no próximo login; segredo TOTP antigo continua decifrável enquanto a versão existir. Remover versão em uso invalida login/TOTP desses usuários (exige reset).
 - Valores ficam só no `.env` real; nunca no banco, logs, respostas ou `repr`. Durações de sessão (30 min ocioso, 12 h absoluto) são constantes de código.
 
@@ -2029,13 +2033,14 @@ Review round 1:
 - Validação em transação própria curta (`get_auth_sessions`), nunca na UoW de domínio; produz `Principal` escalar imutável. Sem locks: leitura + `UPDATE` condicional de `ultimo_uso_em` (≤ 1×/60 s). Revogação vale para requests validados depois do commit.
 - Sessão: 32 bytes aleatórios, banco guarda SHA-256; 30 min ocioso, 12 h absoluto; revogada por logout, CLI, troca de papel, desativação, reset de senha/MFA. Admin só valida com TOTP confirmado.
 - CSRF: mutação autenticada por cookie exige `X-CSRF-Token` igual ao emitido no login (comparação constante); Bearer não usa cookie ambiente e dispensa CSRF.
-- Senha: NFC, 8–64 caracteres, blocklist, sem composição; HMAC-SHA-256 com pepper versionado → argon2id `m=64 MiB, t=3, p=4`, fora de transação e fora do event loop; rehash no login.
-- Login sem enumeração: e-mail inexistente, usuário pendente/desativado, conta bloqueada, senha errada, admin sem TOTP e entrada malformada → mesma resposta 401 e exatamente uma derivação argon2id. Lockout por conta: 10 falhas (senha ou TOTP) → 15 min, dobrando até 24 h; sucesso zera. Limite por origem em memória por processo (30 tentativas/5 min por endpoint de credencial) → 429 + `Retry-After`.
-- TOTP: RFC 6238 SHA-1/6 dígitos/30 s, janela ±1, aceito só para passo maior que o último sob lock do usuário (anti-replay), 5 tentativas por desafio, segredo AES-256-GCM com AAD da linha do usuário. Obrigatório para admin; ativação de admin fica `pendente` até confirmar TOTP; recuperação só por token `reset_mfa` emitido na CLI (sem "esqueci a senha").
+- Senha: NFC, 8–64 caracteres, blocklist, sem composição; HMAC-SHA-256 com pepper versionado → argon2id `m=32 MiB, t=3, p=1`, fora de transação, em pool dedicado de 2 threads com fila de 16 e espera máxima de 5 s; excedente → 503 + `Retry-After`. Teto de memória de hash: 64 MiB, qualquer que seja a concorrência; `/webhook` não usa esse pool. Vaga pertence à thread: cancelar request não libera vaga em uso. Rehash no login.
+- Login sem enumeração: e-mail inexistente, usuário pendente/desativado, origem em atraso, senha errada, admin sem TOTP e entrada malformada → mesma resposta 401 e exatamente uma derivação argon2id. Atraso por (conta, origem) em `auth_tentativas`: 5 falhas livres, depois 30 s dobrando até 15 min; zera com senha correta, 24 h sem falha ou CLI. Não existe bloqueio de conta por senha errada: terceiros não impedem o dono de entrar de outra origem; a cada 50 falhas seguidas da conta, somadas as origens, há `ERROR`. Limite por origem em memória por processo (30 tentativas/5 min por endpoint de credencial) → 429 + `Retry-After`.
+- Origem: `X-Forwarded-For` só vale se o peer TCP for o proxy de `AUTH_TRUSTED_PROXY_HOST` (default `nginx`, resolvido pelo DNS do Docker, TTL 10 s) e trouxer exatamente um IP; Nginx sobrescreve o header com `$remote_addr` em todo bloco que fala com o app. `*`, listas e faixas são recusados no startup; falha de DNS, lista ou valor inválido → peer TCP. Uvicorn com `proxy_headers=False`. IPv6 é limitado por /64. Rate limit, atraso e auditoria usam essa origem. Prova: `scripts/run_auth_proxy_matrix.sh`.
+- TOTP: RFC 6238 SHA-1/6 dígitos/30 s, janela ±1, aceito só para passo maior que o último sob lock do usuário (anti-replay), 5 tentativas por desafio; 10 códigos errados seguidos bloqueiam só o segundo fator da conta por 15 min, dobrando até 1 h (exige senha correta antes); segredo AES-256-GCM com AAD da linha do usuário. Obrigatório para admin; ativação de admin fica `pendente` até confirmar TOTP; recuperação só por token `reset_mfa` emitido na CLI (sem "esqueci a senha").
 - RBAC: papéis fixos no código; toda rota de `/agentes`/`/sessoes` declara exatamente um `exigir(...)` e o guard do router recusa (403) rota sem declaração. Papel desconhecido não tem permissão. Tokens de serviço nunca são `admin` (contornariam o MFA).
 - Mascaramento: sem `sessao.ler_telefone` (`leitura`) todo `telefone` de sessão e o `numero_notificacao` legado do agente viram `5511*****0042` nas respostas. Conteúdo de mensagens do histórico e de `system_prompt` não é reescrito.
 - Auditoria: `auth_auditoria` com eventos e chaves allowlisted. Mutação de domínio grava o evento na mesma transação da mudança, depois dos locks (folha sem FK): sem auditoria, sem mudança. Login, MFA e negação de acesso usam transação própria; falha nela é sinalizada (contador + ERROR, limiar 1) sem alterar a resposta. Telefone/e-mail sempre mascarados.
-- CLI container-only `python -m src.auth_cli`: `bootstrap-admin` (só sem nenhum admin; corrida serializada pelo range de índice), `usuario criar|listar|papel|desativar|reativar|desbloquear|revogar-sessoes|reset --tipo senha|mfa|ativacao`, `token criar|listar|revogar`. Tokens exibidos uma vez em stdout. Último admin utilizável não pode ser rebaixado/desativado. `--actor` vai para a auditoria (`ator_tipo=cli`).
+- CLI container-only `python -m src.auth_cli`: `bootstrap-admin` (só sem nenhum admin; corrida serializada pelo range de índice), `usuario criar|listar|papel|desativar|reativar|desbloquear [--origem IP]|revogar-sessoes|reset --tipo senha|mfa|ativacao`, `token criar|listar|revogar`. Tokens exibidos uma vez em stdout. Último admin utilizável não pode ser rebaixado/desativado. `--actor` vai para a auditoria (`ator_tipo=cli`).
 - Perímetro: CLIs operacionais existentes (`delivery_cli`, `agent_scheduler_cli`, `provider_auth_cli`) e acesso ao container não passam por este login; acesso ao container continua privilegiado.
 
 ---
