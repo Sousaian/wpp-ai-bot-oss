@@ -4,6 +4,7 @@ import os
 import subprocess
 import sys
 from datetime import datetime
+from http.cookies import SimpleCookie
 from unittest.mock import patch, AsyncMock
 
 import httpx
@@ -118,6 +119,8 @@ class AuthDocsContractTests(unittest.TestCase):
         for attribute in ("HttpOnly", "Secure", "SameSite=Strict", "Path=/"):
             self.assertIn(attribute.lower(), cookie.lower())
             self.assertIn(attribute, doc)
+        parsed = SimpleCookie(cookie)[contexto.SESSION_COOKIE]
+        self.assertEqual(parsed["path"], "/")
         self.assertNotIn("domain=", cookie.lower())
         self.assertIn("sem Domain", doc)
 
