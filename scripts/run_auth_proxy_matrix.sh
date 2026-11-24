@@ -9,7 +9,7 @@ set -Eeuo pipefail
 
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "${repo}/scripts/test_image_version.sh"
-version="$(image_test_build_version "${repo}")"
+build_code_version="$(image_test_build_version "${repo}")"
 id="authpx-$$"; net="$id-net"; db="$id-db"; app="$id-app"; edge="$id-nginx"; img="$id:app"
 work="$(mktemp -d)"
 cleanup() {
@@ -36,7 +36,7 @@ PY
 openssl req -x509 -newkey rsa:2048 -nodes -keyout "$work/privkey.pem" -out "$work/fullchain.pem" -days 1 \
     -subj /CN=seudominio.com.br >/dev/null 2>&1
 chmod 755 "$work"; chmod 644 "$work"/*
-docker build -q --build-arg "DELIVERY_WORKER_CODE_VERSION=$version" -t "$img" "$repo/app" >/dev/null
+docker build --build-arg "DELIVERY_WORKER_CODE_VERSION=${build_code_version}" -q -t "$img" "$repo/app" >/dev/null
 subnet="10.$((RANDOM % 100 + 100)).$((RANDOM % 250)).0/24"; prefix="${subnet%.0/24}"
 docker network create --internal --subnet "$subnet" "$net" >/dev/null
 docker run -d --name "$db" --network "$net" --network-alias db -e MYSQL_ROOT_PASSWORD=synthetic-root mysql:8.0 >/dev/null
@@ -51,7 +51,7 @@ start_app() {
     docker run -d --name "$app" --network "$net" --network-alias app --memory 512m --memory-swap 512m \
         -e DATABASE_URL='mysql+aiomysql://root:synthetic-root@db:3306/wpp_test' -e OPENROUTER_API_KEY=synthetic \
         -e EVOLUTION_API_URL=http://evolution.invalid -e EVOLUTION_API_KEY=synthetic -e FORWARDED_ALLOW_IPS='*' \
-        -e "DELIVERY_WORKER_CODE_VERSION=$version" \
+        -e "DELIVERY_WORKER_CODE_VERSION=${build_code_version}" \
         -e 'AUTH_PASSWORD_PEPPER_KEYS={"1":"synthetic-pepper-0123456789abcdef-xyz"}' \
         -e "AUTH_TOTP_ENCRYPTION_KEYS={\"1\":\"$key\"}" "$img" >/dev/null
     for _ in $(seq 1 60); do
