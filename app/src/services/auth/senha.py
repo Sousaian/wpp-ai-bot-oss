@@ -24,7 +24,7 @@ import unicodedata
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 
-from argon2 import PasswordHasher, Type
+from argon2 import PasswordHasher, Type, extract_parameters
 from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
 from loguru import logger
 
@@ -39,6 +39,9 @@ SENHA_MAX = 64
 HASHER = PasswordHasher(
     time_cost=3, memory_cost=32768, parallelism=1, hash_len=32, salt_len=16, type=Type.ID
 )
+# A stored hash costlier than this would break the memory budget: it never
+# verifies (ERROR signal) and its owner needs a reset_senha token.
+CUSTO_MAXIMO = (32768, 3, 1)  # memory KiB, time, parallelism
 WORKERS = 2
 FILA_MAXIMA = 16
 ESPERA_MAXIMA = 5.0
@@ -71,8 +74,9 @@ class HashOcupado(RuntimeError):
 class PiscinaHash:
     """Dedicated pool with bounded admission.
 
-    A slot belongs to the worker job, not to the request: cancelling a request
-    never frees a slot whose thread is still hashing.
+    A slot belongs to the queued job, not to the request, and is freed only
+    when a worker consumes it: cancelling requests can neither free a slot that
+    is still hashing nor grow the executor queue. Abandoned jobs do no work.
     """
 
     def __init__(self, workers: int = WORKERS, fila: int = FILA_MAXIMA) -> None:
@@ -91,7 +95,17 @@ class PiscinaHash:
         logger.error("Auth hashing saturated | count={} threshold=1", self.recusas)
         return HashOcupado("auth hashing saturated")
 
+    @property
+    def saturada(self) -> bool:
+        with self._lock:
+            return self._ativos >= self._capacidade
+
     async def executar(self, funcao, *args):
+        abandonado = threading.Event()
+
+        def trabalho():
+            return None if abandonado.is_set() else funcao(*args)
+
         with self._lock:
             if self._ativos >= self._capacidade:
                 recusado = True
@@ -101,16 +115,19 @@ class PiscinaHash:
         if recusado:
             raise self._recusar()
         try:
-            futuro = self._executor.submit(funcao, *args)
+            futuro = self._executor.submit(trabalho)
         except BaseException:
             with self._lock:
                 self._ativos -= 1
             raise
         futuro.add_done_callback(self._liberar)
         try:
-            return await asyncio.wait_for(asyncio.wrap_future(futuro), ESPERA_MAXIMA)
+            # shield: the executor future is never cancelled, so its slot stays.
+            return await asyncio.wait_for(asyncio.shield(asyncio.wrap_future(futuro)), ESPERA_MAXIMA)
         except asyncio.TimeoutError:
             raise self._recusar() from None
+        finally:
+            abandonado.set()
 
 
 PISCINA = PiscinaHash()
@@ -171,6 +188,24 @@ def _hash_sync(senha: str) -> tuple[str, int]:
     return HASHER.hash(_peppered(senha, versao)), versao
 
 
+def _dentro_do_orcamento(senha_hash: str) -> bool:
+    try:
+        p = extract_parameters(senha_hash)
+    except InvalidHashError:
+        return False
+    if p.memory_cost <= CUSTO_MAXIMO[0] and p.time_cost <= CUSTO_MAXIMO[1] and p.parallelism <= CUSTO_MAXIMO[2]:
+        return True
+    logger.error("Auth stored hash above the memory budget refused | threshold=1")
+    return False
+
+
+def exigir_capacidade() -> None:
+    """Refuse before any database work when hashing is already saturated."""
+
+    if PISCINA.saturada:
+        raise PISCINA._recusar()
+
+
 def _verify_sync(senha: str | None, senha_hash: str | None, versao: int | None) -> Verificacao:
     usable = bool(
         isinstance(senha, str)
@@ -178,6 +213,7 @@ def _verify_sync(senha: str | None, senha_hash: str | None, versao: int | None) 
         and versao is not None
         and versao in settings.auth_password_pepper_keys
         and senha_hash.startswith("$argon2id$")
+        and _dentro_do_orcamento(senha_hash)
     )
     if not usable:
         # Same single derivation as a real mismatch.

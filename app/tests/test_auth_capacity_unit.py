@@ -11,7 +11,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 from starlette.requests import Request
 
 from src import app_server
@@ -66,7 +66,9 @@ class HashCapacityTests(unittest.IsolatedAsyncioTestCase):
     def test_budget_constants(self) -> None:
         self.assertEqual((senha.HASHER.memory_cost, senha.HASHER.time_cost, senha.HASHER.parallelism),
                          (32 * 1024, 3, 1))
-        self.assertLessEqual(senha.WORKERS * senha.HASHER.memory_cost, 64 * 1024)
+        self.assertLessEqual(senha.WORKERS * senha.CUSTO_MAXIMO[0], 64 * 1024)
+        self.assertLessEqual((senha.HASHER.memory_cost, senha.HASHER.time_cost, senha.HASHER.parallelism),
+                             senha.CUSTO_MAXIMO)
 
     async def test_cancelled_request_keeps_its_slot_until_the_thread_ends(self) -> None:
         pool, release = senha.PiscinaHash(workers=1, fila=1), threading.Event()
@@ -85,13 +87,48 @@ class HashCapacityTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(senha.HashOcupado):  # 1 still hashing + 1 queued
             async with asyncio.timeout(1):  # refused at once, not by the wait limit
                 await pool.executar(int)
-        queued.cancel()  # a queued job that never started frees its slot
+        queued.cancel()  # still physically queued: keeps its slot until consumed
         await asyncio.gather(queued, return_exceptions=True)
-        waiting = asyncio.create_task(pool.executar(int))
-        await asyncio.sleep(0.05)
-        self.assertFalse(waiting.done())
+        with self.assertRaises(senha.HashOcupado):
+            async with asyncio.timeout(1):
+                await pool.executar(int)
         release.set()
-        self.assertEqual(await waiting, 0)
+        async with asyncio.timeout(5):
+            while pool.saturada:
+                await asyncio.sleep(0.01)
+            self.assertEqual(await pool.executar(int), 0)
+
+    async def test_cancelled_requests_never_grow_the_queue_nor_do_work(self) -> None:
+        pool, release, ran = senha.PiscinaHash(workers=2, fila=16), threading.Event(), []
+        blocked = [asyncio.create_task(pool.executar(release.wait, 10)) for _ in range(2)]
+        await asyncio.sleep(0.05)
+        refused = 0
+        for _ in range(2000):
+            task = asyncio.create_task(pool.executar(ran.append, 1))
+            await asyncio.sleep(0)
+            task.cancel()
+            result, = await asyncio.gather(task, return_exceptions=True)
+            refused += isinstance(result, senha.HashOcupado)
+        self.assertLessEqual(pool._executor._work_queue.qsize(), 16)
+        self.assertEqual(refused, 2000 - 16)
+        release.set()
+        await asyncio.gather(*blocked)
+        async with asyncio.timeout(5):
+            while pool._ativos:
+                await asyncio.sleep(0.01)
+        self.assertEqual(ran, [])  # abandoned jobs are consumed without hashing
+
+    async def test_hash_above_the_budget_never_verifies(self) -> None:
+        from argon2 import PasswordHasher, Type
+        keys = {1: SecretStr("synthetic-pepper-0123456789abcdef-xyz")}
+        with patch.object(settings, "auth_password_pepper_keys", keys):
+            for memory, cost, lanes in ((65536, 3, 4), (32768, 4, 1), (32768, 3, 2)):
+                legacy = PasswordHasher(time_cost=cost, memory_cost=memory, parallelism=lanes, type=Type.ID)
+                stored = legacy.hash(senha._peppered("frase longa sintetica 42", 1))
+                self.assertEqual(await senha.verificar("frase longa sintetica 42", stored, 1),
+                                 senha.Verificacao(ok=False, precisa_rehash=False))
+            stored, version = await senha.gerar_hash("frase longa sintetica 42")
+            self.assertTrue((await senha.verificar("frase longa sintetica 42", stored, version)).ok)
 
     async def test_wait_is_bounded(self) -> None:
         pool, release = senha.PiscinaHash(workers=1, fila=2), threading.Event()

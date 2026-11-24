@@ -204,6 +204,7 @@ async def login(
     senha_informada: object,
     origem_ip: str | None = None,
 ) -> SessaoEmitida | DesafioMfa:
+    senha.exigir_capacidade()
     try:
         canonico = canonicalizar_email(email)
     except EmailInvalido:
