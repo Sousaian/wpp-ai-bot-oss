@@ -18,7 +18,7 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.database.repositories import auth_repo
-from src.services.auth import auditoria, limites, senha, sessao
+from src.services.auth import limites, origem, senha, sessao
 from src.services.auth.contexto import (
     SESSION_COOKIE,
     Principal,
@@ -84,18 +84,24 @@ class MeResponseSchema(BaseModel):
     expira_em: datetime | None = None
 
 
-def _limitar(request: Request, escopo: str) -> None:
-    retry_after = limites.LIMITE.registrar(escopo, request.client.host if request.client else None)
+def _ocupado() -> HTTPException:
+    return HTTPException(
+        status_code=503, detail="autenticacao ocupada", headers={"Retry-After": "2"}
+    )
+
+
+async def _limitar(request: Request, escopo: str) -> str:
+    """Count one attempt of the real client; return its IP."""
+
+    ip = await origem.cliente(request)
+    retry_after = limites.LIMITE.registrar(escopo, origem.chave(ip))
     if retry_after is not None:
         raise HTTPException(
             status_code=429,
             detail="muitas tentativas",
             headers={"Retry-After": str(int(retry_after + 0.999))},
         )
-
-
-def _origem(request: Request) -> str | None:
-    return auditoria.origem(request)
+    return ip
 
 
 def _enrolamento(iniciado: sessao.EnrolamentoIniciado | None, status: str) -> EnrolamentoResponseSchema:
@@ -127,12 +133,14 @@ async def login(
     sessions: async_sessionmaker[AsyncSession] = Depends(get_auth_sessions),
 ):
     exigir_configuracao()
-    _limitar(request, "login")
+    ip = await _limitar(request, "login")
     response.headers["Cache-Control"] = "no-store"
     try:
         resultado = await sessao.login(
-            sessions, email=dados.email, senha_informada=dados.senha, origem_ip=_origem(request)
+            sessions, email=dados.email, senha_informada=dados.senha, origem_ip=ip
         )
+    except senha.HashOcupado:
+        raise _ocupado() from None
     except sessao.CredenciaisInvalidas:
         raise HTTPException(status_code=401, detail=CREDENCIAIS_INVALIDAS) from None
     if isinstance(resultado, sessao.DesafioMfa):
@@ -154,11 +162,11 @@ async def verificar_totp(
     """Second login step: challenge + TOTP code → session cookie."""
 
     exigir_configuracao()
-    _limitar(request, "totp")
+    ip = await _limitar(request, "totp")
     response.headers["Cache-Control"] = "no-store"
     try:
         emitida = await sessao.verificar_totp(
-            sessions, desafio=dados.desafio, codigo=dados.codigo, origem_ip=_origem(request)
+            sessions, desafio=dados.desafio, codigo=dados.codigo, origem_ip=ip
         )
     except sessao.CodigoInvalido:
         raise HTTPException(status_code=401, detail="codigo invalido") from None
@@ -182,7 +190,7 @@ async def enrolar_totp(
     response.headers["Cache-Control"] = "no-store"
     try:
         iniciado = await sessao.iniciar_enrolamento(
-            sessions, usuario_id=principal.id, origem_ip=_origem(request)
+            sessions, usuario_id=principal.id, origem_ip=principal.origem_ip
         )
     except sessao.EnrolamentoNaoPermitido:
         raise HTTPException(status_code=409, detail="totp ja configurado") from None
@@ -198,10 +206,10 @@ async def confirmar_totp(
     """Finish an enrolment (activation, reset_mfa or voluntary)."""
 
     exigir_configuracao()
-    _limitar(request, "totp")
+    ip = await _limitar(request, "totp")
     try:
         status = await sessao.confirmar_totp(
-            sessions, desafio=dados.desafio, codigo=dados.codigo, origem_ip=_origem(request)
+            sessions, desafio=dados.desafio, codigo=dados.codigo, origem_ip=ip
         )
     except sessao.CodigoInvalido:
         raise HTTPException(status_code=401, detail="codigo invalido") from None
@@ -218,7 +226,7 @@ async def logout(
     if principal.sessao_id is None:
         raise HTTPException(status_code=400, detail="logout requer sessao")
     await sessao.logout(
-        sessions, sessao_id=principal.sessao_id, usuario_id=principal.id, origem_ip=_origem(request)
+        sessions, sessao_id=principal.sessao_id, usuario_id=principal.id, origem_ip=principal.origem_ip
     )
     response.delete_cookie(SESSION_COOKIE, path="/", secure=True, httponly=True, samesite="strict")
     return StatusSchema(status="encerrada")
@@ -263,14 +271,16 @@ async def ativar(
     """Consume an out-of-band activation, password-reset or MFA-reset token."""
 
     exigir_configuracao()
-    _limitar(request, "ativar")
+    ip = await _limitar(request, "ativar")
     response.headers["Cache-Control"] = "no-store"
     try:
         iniciado = await sessao.usar_token(
-            sessions, token=dados.token, nova_senha=dados.senha, origem_ip=_origem(request)
+            sessions, token=dados.token, nova_senha=dados.senha, origem_ip=ip
         )
     except sessao.TokenInvalido:
         raise HTTPException(status_code=400, detail="token invalido") from None
+    except senha.HashOcupado:
+        raise _ocupado() from None
     except senha.SenhaRecusada as exc:
         raise HTTPException(status_code=422, detail=exc.code) from None
     return _enrolamento(iniciado, "senha_definida")

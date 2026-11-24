@@ -75,6 +75,9 @@ def main(app=None, *, host: str | None = None, port: int | None = None) -> None:
         host=settings.app_host if host is None else host,
         port=settings.app_port if port is None else port,
         timeout_graceful_shutdown=APP_HTTP_DRAIN_SECONDS,
+        # request.client is the TCP peer; services/auth/origem.py alone decides
+        # whether it is the trusted proxy (FORWARDED_ALLOW_IPS has no effect).
+        proxy_headers=False,
     )
     # Config reconfigures stdlib logging; install privacy filter AFTER it.
     from src.utils.access_log import configure_uvicorn_access_log_redaction

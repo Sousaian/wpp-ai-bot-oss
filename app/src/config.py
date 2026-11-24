@@ -2,6 +2,7 @@ import base64
 import binascii
 import hashlib
 import json
+import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Literal
@@ -196,6 +197,18 @@ class Settings(BaseSettings):
         default_factory=dict,
         repr=False,
     )
+
+    # Only this peer may name the client in X-Forwarded-For (Compose service
+    # name or one literal IP; empty trusts nobody). Never "*" or a range.
+    auth_trusted_proxy_host: str = "nginx"
+
+    @field_validator("auth_trusted_proxy_host")
+    @classmethod
+    def trusted_proxy_is_one_host(cls, value: str) -> str:
+        host = value.strip()
+        if host and not re.fullmatch(r"[A-Za-z0-9]([A-Za-z0-9.\-]*[A-Za-z0-9])?|[0-9A-Fa-f:]{2,45}", host):
+            raise ValueError("trusted proxy must be a single host name or IP address")
+        return host
 
     @field_validator("chatwoot_webhook_id", mode="before")
     @classmethod

@@ -33,7 +33,7 @@ EVENTOS = frozenset({
     "token_servico_criado", "token_servico_revogado",
 })
 CHAVES_DETALHE = frozenset({
-    "agente_id", "campos", "codigo", "email_mascarado", "metodo", "motivo", "papel",
+    "agente_id", "campos", "codigo", "email_mascarado", "metodo", "motivo", "origens_liberadas", "papel",
     "papel_anterior", "permissoes", "rota", "sessoes_revogadas", "status", "telefone_mascarado",
     "tipo",
 })
@@ -71,13 +71,8 @@ def _detalhe(detalhe: dict[str, object] | None) -> dict[str, object] | None:
     return dict(detalhe)
 
 
-def origem(request: Request | None) -> str | None:
-    host = request.client.host if request is not None and request.client else None
-    return host[:45] if host else None
-
-
 def ator(principal) -> dict[str, object]:
-    return {"ator_tipo": principal.tipo, "ator_id": principal.id}
+    return {"ator_tipo": principal.tipo, "ator_id": principal.id, "origem_ip": principal.origem_ip}
 
 
 async def registrar(
@@ -138,7 +133,6 @@ async def acesso_negado(
         "acesso_negado",
         resultado="negado",
         **ator(principal),
-        origem_ip=origem(request),
         detalhe={
             "metodo": request.method,
             "rota": getattr(route, "path", None),

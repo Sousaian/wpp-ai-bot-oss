@@ -1,7 +1,7 @@
 """AUTH-1: the only SQL of API operator authentication (§10.2).
 
 Lock order inside an auth transaction: ``auth_usuarios`` (admin range by
-index, then rows by id) → ``auth_sessoes`` → ``auth_tokens_uso_unico`` /
+index, then rows by id) → ``auth_tentativas`` → ``auth_sessoes`` → ``auth_tokens_uso_unico`` /
 ``auth_tokens_servico``. Decisions are taken only on locking reads with
 ``populate_existing``; a plain read is used solely to discover the row id
 that the transaction locks and then revalidates. Request authentication
@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -21,6 +21,7 @@ from src.database import db_errors
 from src.database.models import (
     AuthAuditoria,
     AuthSessao,
+    AuthTentativa,
     AuthTokenServico,
     AuthTokenUsoUnico,
     AuthUsuario,
@@ -89,7 +90,7 @@ async def criar_usuario(
     db: AsyncSession, *, email: str, papel: str, status: str
 ) -> AuthUsuario:
     usuario = AuthUsuario(
-        email=email, papel=papel, status=status, falhas_consecutivas=0, bloqueios_consecutivos=0
+        email=email, papel=papel, status=status, falhas_consecutivas=0, totp_falhas=0, totp_bloqueios=0
     )
     # No savepoint: a duplicate aborts the caller's whole short transaction.
     db.add(usuario)
@@ -116,6 +117,54 @@ async def substituir_senha_se_inalterada(
         .execution_options(synchronize_session=False)
     )
     return result.rowcount == 1
+
+
+# ── tentativas (caller holds the user X lock) ──────────────────────────────
+async def lock_tentativa(db: AsyncSession, *, usuario_id: int, origem: str) -> AuthTentativa | None:
+    return (
+        await db.execute(
+            select(AuthTentativa)
+            .where(AuthTentativa.usuario_id == usuario_id, AuthTentativa.origem == origem)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+
+
+async def registrar_tentativa(
+    db: AsyncSession, *, registro: AuthTentativa | None, usuario_id: int, origem: str, falhas: int,
+    agora: datetime, liberado_em: datetime | None,
+) -> None:
+    if registro is None:
+        registro = AuthTentativa(usuario_id=usuario_id, origem=origem)
+        db.add(registro)
+    registro.falhas = falhas
+    registro.ultima_falha_em = agora
+    registro.liberado_em = liberado_em
+    await db.flush()
+
+
+async def limpar_tentativas(
+    db: AsyncSession, *, usuario_id: int, origem: str | None = None, antes_de: datetime | None = None
+) -> int:
+    criteria = [AuthTentativa.usuario_id == usuario_id]
+    if origem is not None:
+        criteria.append(AuthTentativa.origem == origem)
+    if antes_de is not None:
+        criteria.append(AuthTentativa.ultima_falha_em < antes_de)
+    result = await db.execute(
+        delete(AuthTentativa).where(*criteria).execution_options(synchronize_session=False)
+    )
+    return int(result.rowcount or 0)
+
+
+async def contar_atrasos(db: AsyncSession, *, agora: datetime) -> dict[int, int]:
+    rows = await db.execute(
+        select(AuthTentativa.usuario_id, func.count())
+        .where(AuthTentativa.liberado_em > agora)
+        .group_by(AuthTentativa.usuario_id)
+    )
+    return {int(usuario_id): int(total) for usuario_id, total in rows}
 
 
 # ── sessoes ────────────────────────────────────────────────────────────────
