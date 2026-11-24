@@ -124,6 +124,7 @@ async def avaliar_origem(db: AsyncSession, usuario, *, chave: str, agora: dateti
 async def login(
     sessions: async_sessionmaker[AsyncSession], *, email: object, senha_informada: object, origem_ip: str | None
 ) -> SessaoEmitida:
+    senha.exigir_capacidade()
     try:
         canonico = canonicalizar_email(email)
     except EmailInvalido:

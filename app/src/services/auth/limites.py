@@ -5,10 +5,13 @@ credential endpoints with 429. It is per process and resets on restart.
 
 The durable control is a progressive delay per (account, source) in
 ``auth_tentativas``: 5 free failures, then 30 s doubling up to 15 min, reset
-by a correct password, 24 h of silence or ``auth_cli usuario desbloquear``.
-It never locks the account for other sources, so a third party who knows an
+by a correct password once the delay elapsed, 24 h of silence or ``auth_cli
+usuario desbloquear``. It never locks the account for other sources, so a third party who knows an
 e-mail cannot keep its owner out. A delayed source gets the same answer as a
 wrong password (no enumeration). Failures across sources only raise a signal.
+Accepted residual: clients sharing one address (NAT, IPv6 /64) share the delay
+of an account, at most 15 min; letting the right password through would remove
+the only brute-force cost.
 """
 
 from __future__ import annotations
