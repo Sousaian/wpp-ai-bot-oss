@@ -10,7 +10,7 @@ no ORM row reaches a route, so the domain UoW starts clean (§16.1 A1).
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import Literal
 
@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from src.config import settings
 from src.database.connection import AsyncSessionLocal
 from src.database.repositories import auth_repo, scheduler_repo
-from src.services.auth import segredos
+from src.services.auth import origem, segredos
 
 
 SESSION_COOKIE = "__Host-wpp_sessao"
@@ -45,6 +45,8 @@ class Principal:
     papel: str
     sessao_id: int | None = None
     via_cookie: bool = False
+    # Real client address (services/auth/origem.py), for audit only.
+    origem_ip: str | None = None
 
 
 @dataclass(frozen=True)
@@ -169,7 +171,7 @@ async def autenticar(
         )
         if principal is None:
             raise nao_autenticado()
-        return principal
+        return replace(principal, origem_ip=await origem.cliente(request))
     if cookie is None:
         raise nao_autenticado()
     token_hash = segredos.digest_se_valido("sessao", cookie)
@@ -182,4 +184,4 @@ async def autenticar(
         request.headers.get(CSRF_HEADER), valida.csrf_hash
     ):
         raise proibido("csrf invalido")
-    return valida.principal
+    return replace(valida.principal, origem_ip=await origem.cliente(request))

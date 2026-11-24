@@ -15,11 +15,11 @@ from unittest.mock import patch
 
 import pyotp
 from fastapi import Depends
-from sqlalchemy import select, text, update
+from sqlalchemy import func, select, text, update
 
 from src import main
 from src.database.models import Agente, AuthAuditoria, AuthUsuario, Sessao
-from src.services.auth import administracao, auditoria, rbac, segredos, totp
+from src.services.auth import administracao, auditoria, limites, rbac, segredos, totp
 from src.services.auth.rbac import Permissao as P
 from tests import test_auth_api_mysql as base
 
@@ -352,17 +352,68 @@ class AuthRbacMySQLTests(base.AuthApiMySQLTests):
         ok = await self.client().post("/auth/totp/confirmar", json={"desafio": desafio, "codigo": self.code(email)})
         self.assertEqual(ok.status_code, 200)
 
-    async def test_totp_failures_count_toward_lockout(self) -> None:
+    async def test_totp_lock_is_short_account_wide_and_needs_the_password(self) -> None:
         admin_id, email = await self.user("admin")
-        for _ in range(2):
-            client, response = await self.login(email)
-            for _ in range(5):
-                await client.post("/auth/totp/verificar", json={"desafio": response.json()["desafio"],
-                                                                "codigo": "000000"})
-        async with self.sessions() as db:
-            row = (await db.execute(select(AuthUsuario).where(AuthUsuario.id == admin_id))).scalar_one()
-        self.assertEqual(row.bloqueios_consecutivos, 1)
-        self.assertIsNotNone(row.bloqueado_ate)
+
+        async def wrong_codes(total: int) -> None:
+            while total:
+                client, response = await self.login(email, source=f"198.51.100.{total}")
+                for _ in range(min(5, total)):
+                    bad = await client.post("/auth/totp/verificar", json={
+                        "desafio": response.json()["desafio"], "codigo": "000000"})
+                    self.assertEqual(bad.status_code, 401)
+                total -= min(5, total)
+                limites.LIMITE.reset()
+
+        async def row() -> AuthUsuario:
+            async with self.sessions() as db:
+                return (await db.execute(select(AuthUsuario).where(AuthUsuario.id == admin_id))).scalar_one()
+
+        # A stranger without the password never reaches the second factor.
+        for n in range(20):
+            await self.login(email, "senha errada 000", source=f"203.0.113.{n + 1}")
+        self.assertEqual(((await row()).totp_falhas, (await row()).totp_bloqueado_ate), (0, None))
+        for expected in (900, 1800, 3600, 3600):
+            await wrong_codes(limites.TOTP_FALHAS_ATE_BLOQUEIO)
+            locked = await row()
+            async with self.sessions() as db:
+                now = (await db.execute(select(func.utc_timestamp(6)))).scalar_one()
+            self.assertAlmostEqual((locked.totp_bloqueado_ate - now).total_seconds(), expected, delta=60)
+            # Locked: the right code is refused from any source.
+            self.assertEqual((await self.full_login(email, source="192.0.2.77"))[1].status_code, 401)
+            limites.LIMITE.reset()
+            await self.execute(update(AuthUsuario).where(AuthUsuario.id == admin_id).values(
+                totp_bloqueado_ate=func.utc_timestamp(6) - text("INTERVAL 1 SECOND")))
+        self.assertEqual((await self.full_login(email))[1].status_code, 200)  # success resets
+        self.assertEqual(((await row()).totp_bloqueios, (await row()).totp_bloqueado_ate), (0, None))
+        await wrong_codes(limites.TOTP_FALHAS_ATE_BLOQUEIO)
+        self.assertEqual((await self.full_login(email))[1].status_code, 401)
+        await administracao.desbloquear(self.sessions, ator="teste", usuario_id=admin_id)
+        self.assertEqual((await self.full_login(email))[1].status_code, 200)
+        self.assertIn("usuario_desbloqueado", [r.evento for r in await self.audit_rows()])
+
+    async def test_audit_records_the_real_client_behind_the_proxy(self) -> None:
+        agente_id = await self.agent_with_session()
+        _, email = await self.user("admin")
+        _, leitura_email = await self.user("leitura")
+        via = {"X-Forwarded-For": "203.0.113.200"}
+        client = self.client(base.PROXY_IP)
+        challenge = await client.post("/auth/login", headers=via, json={"email": email, "senha": base.SENHA})
+        session = await client.post("/auth/totp/verificar", headers=via, json={
+            "desafio": challenge.json()["desafio"], "codigo": self.code(email)})
+        headers = {**via, "X-CSRF-Token": session.json()["csrf_token"]}
+        self.assertEqual((await client.post(f"/sessoes/{PHONE}/transferir", params={"agente_id": agente_id},
+                                            headers=headers)).status_code, 200)
+        reader = self.client(base.PROXY_IP)
+        csrf = (await reader.post("/auth/login", headers=via, json={
+            "email": leitura_email, "senha": base.SENHA})).json()["csrf_token"]
+        await reader.delete("/agentes/999999", headers={**via, "X-CSRF-Token": csrf})
+        # A direct peer cannot write somebody else's address into the trail.
+        await self.login(email, "senha errada 000", source="198.51.100.9", forwarded="203.0.113.201")
+        by_event = {r.evento: r.origem_ip for r in await self.audit_rows()}
+        for event in ("login_sucesso", "sessao_transferida", "acesso_negado"):
+            self.assertEqual(by_event[event], "203.0.113.200", event)
+        self.assertEqual(by_event["login_falha"], "198.51.100.9")
 
     async def test_secret_is_encrypted_and_bound_to_user(self) -> None:
         admin_id, email = await self.user("admin")

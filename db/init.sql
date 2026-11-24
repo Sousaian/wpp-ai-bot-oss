@@ -3022,8 +3022,9 @@ CREATE TABLE IF NOT EXISTS auth_usuarios (
     totp_confirmado_em DATETIME(6) NULL,
     totp_ultimo_passo BIGINT UNSIGNED NULL,
     falhas_consecutivas INT UNSIGNED NOT NULL DEFAULT 0,
-    bloqueios_consecutivos INT UNSIGNED NOT NULL DEFAULT 0,
-    bloqueado_ate DATETIME(6) NULL,
+    totp_falhas INT UNSIGNED NOT NULL DEFAULT 0,
+    totp_bloqueios INT UNSIGNED NOT NULL DEFAULT 0,
+    totp_bloqueado_ate DATETIME(6) NULL,
     criado_em DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
     atualizado_em DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
     PRIMARY KEY (id),
@@ -3074,6 +3075,23 @@ CREATE TABLE IF NOT EXISTS auth_sessoes (
 );
 
 -- auth-1-schema-boundary: sessoes-created
+
+-- Progressive delay per (account, source). Nothing here locks an account for
+-- other sources; rows expire after 24 h of silence.
+CREATE TABLE IF NOT EXISTS auth_tentativas (
+    usuario_id BIGINT UNSIGNED NOT NULL,
+    origem VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    falhas INT UNSIGNED NOT NULL,
+    ultima_falha_em DATETIME(6) NOT NULL,
+    liberado_em DATETIME(6) NULL,
+    PRIMARY KEY (usuario_id, origem),
+    INDEX idx_auth_tentativa_expira (usuario_id, ultima_falha_em),
+    CONSTRAINT fk_auth_tentativa_usuario FOREIGN KEY (usuario_id)
+        REFERENCES auth_usuarios(id) ON DELETE RESTRICT ON UPDATE RESTRICT,
+    CONSTRAINT ck_auth_tentativa_falhas CHECK (falhas > 0)
+);
+
+-- auth-1-schema-boundary: tentativas-created
 
 CREATE TABLE IF NOT EXISTS auth_tokens_servico (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -3173,10 +3191,11 @@ BEGIN
         '9|totp_confirmado_em|datetime(6)|YES|<NULL>|<NULL>|<NULL>|;',
         '10|totp_ultimo_passo|bigint unsigned|YES|<NULL>|<NULL>|<NULL>|;',
         '11|falhas_consecutivas|int unsigned|NO|0|<NULL>|<NULL>|;',
-        '12|bloqueios_consecutivos|int unsigned|NO|0|<NULL>|<NULL>|;',
-        '13|bloqueado_ate|datetime(6)|YES|<NULL>|<NULL>|<NULL>|;',
-        '14|criado_em|datetime(6)|NO|CURRENT_TIMESTAMP(6)|<NULL>|<NULL>|DEFAULT_GENERATED;',
-        '15|atualizado_em|datetime(6)|NO|CURRENT_TIMESTAMP(6)|<NULL>|<NULL>|DEFAULT_GENERATED on update CURRENT_TIMESTAMP(6)') THEN
+        '12|totp_falhas|int unsigned|NO|0|<NULL>|<NULL>|;',
+        '13|totp_bloqueios|int unsigned|NO|0|<NULL>|<NULL>|;',
+        '14|totp_bloqueado_ate|datetime(6)|YES|<NULL>|<NULL>|<NULL>|;',
+        '15|criado_em|datetime(6)|NO|CURRENT_TIMESTAMP(6)|<NULL>|<NULL>|DEFAULT_GENERATED;',
+        '16|atualizado_em|datetime(6)|NO|CURRENT_TIMESTAMP(6)|<NULL>|<NULL>|DEFAULT_GENERATED on update CURRENT_TIMESTAMP(6)') THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'auth-1 auth_usuarios column shape requires audited repair';
     END IF;
     SELECT GROUP_CONCAT(CONCAT_WS('|', index_name, non_unique, seq_in_index, column_name,
@@ -3248,6 +3267,43 @@ BEGIN
         'ck_auth_sessao_estagio|YES|a3739b7700594b596147d4ea2642170e7f7ebfb82df9b2362ff0b5d42e8251da;',
         'ck_auth_sessao_revogacao|YES|9e46fe24d90b49c15782de1137064da8e070a709738ec2b51f162e5ad4c816ee') THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'auth-1 auth_sessoes check shape requires audited repair';
+    END IF;
+
+    SELECT GROUP_CONCAT(CONCAT_WS('|', ordinal_position, column_name, column_type,
+        is_nullable, COALESCE(column_default, '<NULL>'),
+        COALESCE(character_set_name, '<NULL>'), COALESCE(collation_name, '<NULL>'), extra)
+        ORDER BY ordinal_position SEPARATOR ';') INTO actual_shape
+    FROM information_schema.columns
+    WHERE table_schema = DATABASE() AND table_name = 'auth_tentativas';
+    IF actual_shape IS NULL OR actual_shape <> CONCAT(
+        '1|usuario_id|bigint unsigned|NO|<NULL>|<NULL>|<NULL>|;',
+        '2|origem|varchar(64)|NO|<NULL>|ascii|ascii_bin|;',
+        '3|falhas|int unsigned|NO|<NULL>|<NULL>|<NULL>|;',
+        '4|ultima_falha_em|datetime(6)|NO|<NULL>|<NULL>|<NULL>|;',
+        '5|liberado_em|datetime(6)|YES|<NULL>|<NULL>|<NULL>|') THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'auth-1 auth_tentativas column shape requires audited repair';
+    END IF;
+    SELECT GROUP_CONCAT(CONCAT_WS('|', index_name, non_unique, seq_in_index, column_name,
+        COALESCE(collation, '<NULL>'), COALESCE(sub_part, '<NULL>'), index_type,
+        is_visible, COALESCE(expression, '<NULL>')) ORDER BY index_name, seq_in_index SEPARATOR ';')
+        INTO actual_shape FROM information_schema.statistics
+    WHERE table_schema = DATABASE() AND table_name = 'auth_tentativas';
+    IF actual_shape IS NULL OR actual_shape <> CONCAT(
+        'idx_auth_tentativa_expira|1|1|usuario_id|A|<NULL>|BTREE|YES|<NULL>;',
+        'idx_auth_tentativa_expira|1|2|ultima_falha_em|A|<NULL>|BTREE|YES|<NULL>;',
+        'PRIMARY|0|1|usuario_id|A|<NULL>|BTREE|YES|<NULL>;',
+        'PRIMARY|0|2|origem|A|<NULL>|BTREE|YES|<NULL>') THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'auth-1 auth_tentativas index shape requires audited repair';
+    END IF;
+    SELECT GROUP_CONCAT(CONCAT_WS('|', tc.constraint_name, tc.enforced, SHA2(cc.check_clause, 256))
+        ORDER BY tc.constraint_name SEPARATOR ';') INTO actual_shape
+    FROM information_schema.table_constraints AS tc
+    JOIN information_schema.check_constraints AS cc
+      ON cc.constraint_schema = tc.constraint_schema AND cc.constraint_name = tc.constraint_name
+    WHERE tc.constraint_schema = DATABASE() AND tc.table_name = 'auth_tentativas';
+    IF actual_shape IS NULL OR actual_shape <> CONCAT(
+        'ck_auth_tentativa_falhas|YES|498921396db34c943a2f385f8f1da9fea09e80425962c2ea4aba927b14dc666c') THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'auth-1 auth_tentativas check shape requires audited repair';
     END IF;
 
     SELECT GROUP_CONCAT(CONCAT_WS('|', ordinal_position, column_name, column_type,
@@ -3387,6 +3443,7 @@ BEGIN
       AND (rc.table_name LIKE 'auth\\_%' OR rc.referenced_table_name LIKE 'auth\\_%');
     IF actual_shape IS NULL OR actual_shape <> CONCAT(
         'fk_auth_sessao_usuario|auth_sessoes|auth_usuarios|1|RESTRICT|RESTRICT|usuario_id|id|1;',
+        'fk_auth_tentativa_usuario|auth_tentativas|auth_usuarios|1|RESTRICT|RESTRICT|usuario_id|id|1;',
         'fk_auth_token_uso_unico_usuario|auth_tokens_uso_unico|auth_usuarios|1|RESTRICT|RESTRICT|usuario_id|id|1') THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'auth-1 foreign key shape requires audited repair';
     END IF;

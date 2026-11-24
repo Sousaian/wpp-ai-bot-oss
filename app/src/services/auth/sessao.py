@@ -1,7 +1,7 @@
 """Login (password + TOTP), logout and one-time-token activation/reset.
 
-Every login failure branch (unknown e-mail, pending/disabled user, locked
-account, wrong password, admin without TOTP, malformed input) runs exactly
+Every login failure branch (unknown e-mail, pending/disabled user, delayed
+source, wrong password, admin without TOTP, malformed input) runs exactly
 one argon2id derivation and raises the same ``CredenciaisInvalidas``.
 Hashing always runs outside any DB transaction; the outcome is applied under
 the user row lock and revalidated against the hash that was actually
@@ -12,7 +12,9 @@ short-lived challenge (``wpd_…``, body only, never a cookie); the session is
 issued by ``verificar_totp``. An admin without confirmed TOTP is refused:
 TOTP is enrolled through the activation or ``reset_mfa`` token flow, never
 from a password-only login. TOTP codes are accepted only for a step newer
-than the last accepted one, under the user row lock.
+than the last accepted one, under the user row lock. Ten wrong codes lock the
+second factor of the account for 15 min (doubling up to 1 h): only someone who
+already proved the password reaches it, so it is no third-party lockout.
 """
 
 from __future__ import annotations
@@ -22,10 +24,11 @@ import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
+from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.database.repositories import auth_repo
-from src.services.auth import auditoria, limites, segredos, senha, totp
+from src.services.auth import auditoria, limites, origem, segredos, senha, totp
 from src.services.auth.contexto import SESSAO_ABSOLUTA, run_auth_transaction
 
 
@@ -99,22 +102,23 @@ def canonicalizar_email(email: object) -> str:
     return canonico
 
 
-def _registrar_falha(usuario, agora: datetime) -> bool:
-    """Count one failure; return True when it applied a lock."""
+def _registrar_falha_totp(usuario, agora: datetime) -> bool:
+    """Count one wrong code; return True when it locked the second factor."""
 
-    usuario.falhas_consecutivas = int(usuario.falhas_consecutivas) + 1
-    if usuario.falhas_consecutivas < limites.FALHAS_ATE_BLOQUEIO:
+    usuario.totp_falhas = int(usuario.totp_falhas) + 1
+    if usuario.totp_falhas < limites.TOTP_FALHAS_ATE_BLOQUEIO:
         return False
-    usuario.bloqueado_ate = agora + limites.duracao_bloqueio(int(usuario.bloqueios_consecutivos))
-    usuario.bloqueios_consecutivos = int(usuario.bloqueios_consecutivos) + 1
-    usuario.falhas_consecutivas = 0
+    usuario.totp_bloqueado_ate = agora + limites.bloqueio_totp(int(usuario.totp_bloqueios))
+    usuario.totp_bloqueios = int(usuario.totp_bloqueios) + 1
+    usuario.totp_falhas = 0
     return True
 
 
 def _zerar_falhas(usuario) -> None:
     usuario.falhas_consecutivas = 0
-    usuario.bloqueios_consecutivos = 0
-    usuario.bloqueado_ate = None
+    usuario.totp_falhas = 0
+    usuario.totp_bloqueios = 0
+    usuario.totp_bloqueado_ate = None
 
 
 async def _emitir_sessao(db: AsyncSession, *, usuario_id: int, papel: str, agora: datetime) -> SessaoEmitida:
@@ -153,6 +157,44 @@ def _audit_login(usuario, email: str | None, origem_ip: str | None, motivo: str 
         "origem_ip": origem_ip,
         "detalhe": detalhe,
     }
+
+
+async def avaliar_origem(db: AsyncSession, usuario, *, chave: str, agora: datetime, ok: bool) -> str | None:
+    """Delay decision for one (account, source); caller holds the user lock.
+
+    Returns None when the correct password may proceed, else the refusal
+    motive. A delayed source is refused even with the right password and its
+    attempts neither count nor extend the delay.
+    """
+
+    usuario_id = int(usuario.id)
+    registro = await auth_repo.lock_tentativa(db, usuario_id=usuario_id, origem=chave)
+    if registro is not None and limites.atrasado(registro.liberado_em, agora):
+        return "atrasado"
+    if ok:
+        if registro is not None:
+            await auth_repo.limpar_tentativas(db, usuario_id=usuario_id, origem=chave)
+        return None
+    recente = registro is not None and registro.ultima_falha_em > agora - limites.FALHAS_VALIDADE
+    falhas = (int(registro.falhas) if recente else 0) + 1
+    espera = limites.atraso(falhas)
+    if registro is None:
+        # Bounded growth: expired sources leave when a new one appears.
+        await auth_repo.limpar_tentativas(
+            db, usuario_id=usuario_id, antes_de=agora - limites.FALHAS_VALIDADE
+        )
+    await auth_repo.registrar_tentativa(
+        db, registro=registro, usuario_id=usuario_id, origem=chave, falhas=falhas, agora=agora,
+        liberado_em=agora + espera if espera else None,
+    )
+    usuario.falhas_consecutivas = int(usuario.falhas_consecutivas) + 1
+    if usuario.falhas_consecutivas % limites.SINAL_FALHAS_CONTA == 0:
+        logger.error(
+            "Auth account under repeated failures | usuario={} count={} threshold={}",
+            usuario_id, usuario.falhas_consecutivas, limites.SINAL_FALHAS_CONTA,
+        )
+    await db.flush()
+    return "atraso_aplicado" if espera else "credenciais"
 
 
 async def login(
@@ -202,18 +244,21 @@ async def login(
             motivo = "senha_alterada"  # the verified hash is stale
         elif usuario.status != "ativo":
             motivo = "status"
-        elif limites.bloqueado(usuario.bloqueado_ate, agora):
-            motivo = "bloqueado"
-        elif not verificacao.ok:
-            motivo = "bloqueio_aplicado" if _registrar_falha(usuario, agora) else "credenciais"
-        elif usuario.totp_confirmado_em is None and usuario.papel == "admin":
+        else:
+            motivo = await avaliar_origem(
+                db, usuario, chave=origem.chave(origem_ip), agora=agora, ok=verificacao.ok
+            )
+        if motivo is None and usuario.totp_confirmado_em is None and usuario.papel == "admin":
             motivo = "admin_sem_mfa"
         if motivo:
             await db.flush()
             await auditoria.registrar(db, "login_falha", **_audit_login(usuario, canonico, origem_ip, motivo))
             return None
         if usuario.totp_confirmado_em is not None:
-            # Password proven; counters reset only after the second factor.
+            # Password proven: the source delay is cleared; the second factor
+            # keeps its own counters.
+            usuario.falhas_consecutivas = 0
+            await db.flush()
             desafio, expira_em = await _emitir_desafio(
                 db, usuario_id=int(usuario.id), estagio="mfa", agora=agora,
                 validade=DESAFIO_MFA_VALIDADE,
@@ -237,8 +282,8 @@ async def _rehash(
 ) -> None:
     try:
         novo_hash, versao = await senha.gerar_hash(texto)
-    except senha.SenhaRecusada:
-        return  # legacy password below the current policy: keep the old hash
+    except (senha.SenhaRecusada, senha.HashOcupado):
+        return  # legacy policy or saturated pool: keep the old hash, login stands
     await run_auth_transaction(
         sessions,
         lambda db: auth_repo.substituir_senha_se_inalterada(
@@ -305,13 +350,13 @@ async def verificar_totp(
         motivo = None
         if usuario.status != "ativo" or usuario.totp_confirmado_em is None:
             motivo = "status"
-        elif limites.bloqueado(usuario.bloqueado_ate, agora):
+        elif limites.atrasado(usuario.totp_bloqueado_ate, agora):
             motivo = "bloqueado"
         elif registro.tentativas_mfa > TENTATIVAS_POR_DESAFIO:
             motivo = "tentativas"
         passo = None if motivo else _passo(usuario, codigo)
         if motivo is None and passo is None:
-            motivo = "bloqueio_aplicado" if _registrar_falha(usuario, agora) else "codigo"
+            motivo = "bloqueio_aplicado" if _registrar_falha_totp(usuario, agora) else "codigo"
         if motivo:
             if motivo in {"tentativas", "status", "bloqueado", "bloqueio_aplicado"}:
                 registro.revogada_em, registro.motivo_revogacao = agora, "mfa_falhou"
@@ -501,6 +546,7 @@ async def usar_token(
             if not (tipo == "ativacao" and usuario.papel == "admin"):
                 usuario.status = "ativo"
             motivo = "senha_redefinida"
+            await auth_repo.limpar_tentativas(db, usuario_id=usuario_id)
         await db.flush()
         await auth_repo.revogar_sessoes_usuario(db, usuario_id=usuario_id, motivo=motivo, agora=agora)
         enrolamento = None

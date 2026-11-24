@@ -1464,8 +1464,9 @@ class AuthUsuario(Base):
     totp_confirmado_em = Column(DATETIME(fsp=6), nullable=True)
     totp_ultimo_passo = Column(BIGINT(unsigned=True), nullable=True)
     falhas_consecutivas = Column(INTEGER(unsigned=True), nullable=False, default=0)
-    bloqueios_consecutivos = Column(INTEGER(unsigned=True), nullable=False, default=0)
-    bloqueado_ate = Column(DATETIME(fsp=6), nullable=True)
+    totp_falhas = Column(INTEGER(unsigned=True), nullable=False, default=0)
+    totp_bloqueios = Column(INTEGER(unsigned=True), nullable=False, default=0)
+    totp_bloqueado_ate = Column(DATETIME(fsp=6), nullable=True)
     criado_em = Column(
         DATETIME(fsp=6), nullable=False, server_default=text("CURRENT_TIMESTAMP(6)")
     )
@@ -1513,6 +1514,32 @@ class AuthSessao(Base):
     expira_em = Column(DATETIME(fsp=6), nullable=False)
     revogada_em = Column(DATETIME(fsp=6), nullable=True)
     motivo_revogacao = Column(String(32, collation="ascii_bin"), nullable=True)
+
+
+class AuthTentativa(Base):
+    """Progressive login delay per (account, source)."""
+
+    __tablename__ = "auth_tentativas"
+    __table_args__ = (
+        Index("idx_auth_tentativa_expira", "usuario_id", "ultima_falha_em"),
+        CheckConstraint("falhas > 0", name="ck_auth_tentativa_falhas"),
+    )
+
+    usuario_id = Column(
+        BIGINT(unsigned=True),
+        ForeignKey(
+            "auth_usuarios.id",
+            name="fk_auth_tentativa_usuario",
+            ondelete="RESTRICT",
+            onupdate="RESTRICT",
+        ),
+        primary_key=True,
+        autoincrement=False,
+    )
+    origem = Column(String(64, collation="ascii_bin"), primary_key=True)
+    falhas = Column(INTEGER(unsigned=True), nullable=False)
+    ultima_falha_em = Column(DATETIME(fsp=6), nullable=False)
+    liberado_em = Column(DATETIME(fsp=6), nullable=True)
 
 
 class AuthTokenServico(Base):

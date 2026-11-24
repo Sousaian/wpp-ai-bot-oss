@@ -43,7 +43,7 @@ fail() { echo "FAIL $1"; exit 1; }
 for cs in latin1 utf8mb4; do
     fresh "f_$cs"
     apply "f_$cs" "$work/new.sql" "$cs" >/dev/null || fail "fresh-$cs"
-    [[ "$(q f_$cs -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name LIKE 'auth\\_%'")" == 5 ]] || fail "fresh-$cs tables"
+    [[ "$(q f_$cs -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name LIKE 'auth\\_%'")" == 6 ]] || fail "fresh-$cs tables"
     case_ok "fresh-$cs"
     for again in latin1 utf8mb4; do
         apply "f_$cs" "$work/new.sql" "$again" >/dev/null || fail "reapply-$cs-$again"
@@ -76,10 +76,10 @@ divergent() { # divergent <name> <ddl> <expected-error-fragment>
     apply d_x "$work/new.sql" latin1 >/dev/null || fail "$1 setup"
     q d_x -e "$2"
     local shape_before shape_after output
-    shape_before="$(q d_x -e "SHOW CREATE TABLE auth_usuarios; SHOW CREATE TABLE auth_sessoes; SHOW CREATE TABLE auth_auditoria")"
+    shape_before="$(q d_x -e "SHOW CREATE TABLE auth_usuarios; SHOW CREATE TABLE auth_sessoes; SHOW CREATE TABLE auth_tentativas; SHOW CREATE TABLE auth_auditoria")"
     if output="$(apply d_x "$work/new.sql" latin1)"; then fail "$1 accepted divergent shape"; fi
     grep -q "$3" <<<"$output" || { echo "$output" | tail -3; fail "$1 wrong error"; }
-    shape_after="$(q d_x -e "SHOW CREATE TABLE auth_usuarios; SHOW CREATE TABLE auth_sessoes; SHOW CREATE TABLE auth_auditoria")"
+    shape_after="$(q d_x -e "SHOW CREATE TABLE auth_usuarios; SHOW CREATE TABLE auth_sessoes; SHOW CREATE TABLE auth_tentativas; SHOW CREATE TABLE auth_auditoria")"
     [[ "$shape_before" == "$shape_after" ]] || fail "$1 rewrote shape"
     case_ok "divergent-$1"
 }
@@ -101,8 +101,12 @@ divergent fk-cascade "ALTER TABLE auth_sessoes DROP FOREIGN KEY fk_auth_sessao_u
     "auth-1 foreign key shape requires audited repair"
 divergent fk-foreign-reference "CREATE TABLE x_ref (id BIGINT UNSIGNED PRIMARY KEY, CONSTRAINT fk_x_ref FOREIGN KEY (id) REFERENCES auth_usuarios(id))" \
     "auth-1 foreign key shape requires audited repair"
+divergent attempts-origin-collation "ALTER TABLE auth_tentativas MODIFY origem VARCHAR(64) CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL" \
+    "auth-1 auth_tentativas column shape requires audited repair"
+divergent attempts-fk-dropped "ALTER TABLE auth_tentativas DROP FOREIGN KEY fk_auth_tentativa_usuario" \
+    "auth-1 foreign key shape requires audited repair"
 divergent trigger-added "CREATE TRIGGER trg_x BEFORE UPDATE ON auth_auditoria FOR EACH ROW SET NEW.evento = NEW.evento" \
     "auth-1 trigger shape requires audited repair"
 
 echo "auth schema matrix: $passed/$expected passed"
-[[ "$passed" == 18 && "$expected" == 18 ]] || { echo "expected 18 executed cases"; exit 1; }
+[[ "$passed" == 20 && "$expected" == 20 ]] || { echo "expected 20 executed cases"; exit 1; }
