@@ -15,9 +15,10 @@ from unittest.mock import patch
 
 import pyotp
 from fastapi import Depends
+from loguru import logger
 from sqlalchemy import func, select, text, update
 
-from src import main
+from src import auth_cli, main
 from src.database.models import Agente, AuthAuditoria, AuthUsuario, Sessao
 from src.services.auth import administracao, auditoria, limites, rbac, segredos, totp
 from src.services.auth.rbac import Permissao as P
@@ -237,7 +238,6 @@ class AuthRbacMySQLTests(base.AuthApiMySQLTests):
         refused = (await self.login(email))[1]
         self.assertEqual((refused.status_code, refused.json()), (401, {"detail": "credenciais invalidas"}))
         # reset_mfa: out-of-band token → enrolment → confirmation → login again.
-        from src import auth_cli
         emitted = []
         rc = await auth_cli.run(auth_cli._parser().parse_args([
             "usuario", "reset", str(admin_id), "--tipo", "mfa", "--actor", "synthetic-operator"
@@ -250,6 +250,39 @@ class AuthRbacMySQLTests(base.AuthApiMySQLTests):
         await self.confirm(enrol.json(), email)
         _, final = await self.full_login(email)
         self.assertEqual(final.status_code, 200)
+
+    async def test_invalid_unicode_challenge_code_and_audit_are_inert(self) -> None:
+        _, email = await self.user("admin")
+        client, login = await self.login(email)
+        challenge = login.json()["desafio"]
+        client = self.safe_client()
+        logs = []
+        sink = logger.add(lambda message: logs.append(str(message)))
+        try:
+            for path in ("/auth/totp/verificar", "/auth/totp/confirmar"):
+                for body in ({"desafio": "wpd_\ud800", "codigo": "123456"},
+                             {"desafio": challenge, "codigo": "12345\ud800"},
+                             {"desafio": challenge, "codigo": "１２３４５６"}):
+                    response = await client.post(path, content=json.dumps(body),
+                                                 headers={"Content-Type": "application/json"})
+                    self.assertEqual(response.status_code, 401, response.text)
+                    self.assertEqual(response.json(), {"detail": "codigo invalido"})
+            for value in ("\ud800@example.invalid", "u@exa\udfffmple.invalid"):
+                masked = auditoria.mascarar_email(value)
+                self.assertEqual(masked, "***")
+                before = await self.count(AuthAuditoria)
+                async with self.sessions() as db:
+                    await auditoria.registrar(db, "login_falha", resultado="falha", ator_tipo="anonimo",
+                                              detalhe={"email_mascarado": masked})
+                    await db.commit()
+                self.assertEqual(await self.count(AuthAuditoria), before + 1)
+                async with self.sessions() as db:
+                    row = (await db.execute(select(AuthAuditoria).order_by(AuthAuditoria.id.desc()))).scalars().first()
+                self.assertEqual(row.detalhe["email_mascarado"], "***")
+            self.assertNotIn("\ud800", "".join(logs))
+            self.assertNotIn("\udfff", "".join(logs))
+        finally:
+            logger.remove(sink)
 
     async def test_admin_activation_stays_pending_until_totp_confirmed(self) -> None:
         emitido = await administracao.bootstrap_admin(self.sessions, ator="teste", email="boot@example.invalid")
