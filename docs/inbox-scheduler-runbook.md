@@ -54,7 +54,12 @@ mounts a synthetic webroot only. Provider callbacks/probes keep using
 Operator CRUD (`/agentes*`, `/sessoes*`) is Docker-network only:
 
 ```bash
-docker compose exec app python -c 'import httpx; r=httpx.get("http://127.0.0.1:5000/agentes"); r.raise_for_status(); print(r.status_code)'
+# Bash: token de serviço leitura/operador; não usar set -x nem imprimir ambiente.
+set +x
+read -rs -p 'Token de serviço: ' WPP_SERVICE_TOKEN; printf '\n'
+export WPP_SERVICE_TOKEN
+docker compose exec -T -e WPP_SERVICE_TOKEN app python -c 'import os, httpx; r=httpx.get("http://127.0.0.1:5000/agentes", headers={"Authorization": "Bearer " + os.environ["WPP_SERVICE_TOKEN"]}); r.raise_for_status(); print(r.status_code)'
+unset WPP_SERVICE_TOKEN
 ```
 
 Do not publish port 5000. `delivery-ops` remains a container-only CLI.

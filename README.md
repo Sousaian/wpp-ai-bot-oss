@@ -17,10 +17,10 @@ Automatizar o primeiro atendimento de contatos no WhatsApp no contexto de cada a
 | Hoje, no código | Direção planejada, ainda não implementada |
 | --- | --- |
 | Uma instalação self-hosted; múltiplos números/agentes com configuração e histórico isolados | Suporte a múltiplos espaços de trabalho na mesma instalação, com isolamento de acesso |
-| Operador configura agentes, prompts, modelos e limites por API/CLI | API/painel com usuários individuais, MFA, papéis e auditoria |
+| Operador configura agentes, prompts, modelos e limites por API/CLI, com login, papéis fixos (`admin`/`operador`/`leitura`), TOTP obrigatório para admin e auditoria | Painel e papéis por espaço de trabalho |
 | Chatwoot gerencia atendimento humano | Configurações e credenciais por espaço de trabalho no futuro painel |
 
-Ainda não é um serviço pronto para vários usuários. Multiagente não significa que usuários distintos já possam compartilhar com segurança uma instalação. Não existem usuários, RBAC ou `empresa_id` no schema atual.
+Ainda não é um serviço pronto para várias empresas. Usuários, papéis fixos e auditoria existem para uma única empresa por instalação, só na API (sem tela). Multiagente não significa que empresas distintas já possam compartilhar com segurança uma instalação: não existe `empresa_id` no schema atual.
 
 ## Estado do projeto
 
@@ -35,7 +35,8 @@ Ainda não é um serviço pronto para vários usuários. Multiagente não signif
 | Retenção, compatibilidade de réplicas e shutdown com prazo | Implementados até PR #13 |
 | Imagens imutáveis, pins adicionais, preflight e bloqueio público do CRUD | F0 integrado/certificado em `5908a94`; deploy/ativação continuam separados |
 | Preparação/persistência Chatwoot, prazo total de readiness e procedimento de release | Hardening complementar planejado |
-| Painel multiusuário/MFA/RBAC | Planejamento separado |
+| Login da API: sessão, tokens de serviço, RBAC fixo, TOTP admin, auditoria | Implementado (empresa única, só API); Nginx não expõe `/auth` |
+| Painel/portal multi-empresa | Planejamento separado |
 | E2E do release com WhatsApp pareado e LLM real | Pendente de autorização/setup operacional |
 
 Merge não significa feature ativada, stack implantada ou E2E concluído. [Estado e roadmap](docs/mapa-do-projeto/estado-e-roadmap.md).
@@ -82,7 +83,8 @@ Diagrama de integrações, não de uma única transação:
 
 ## Segurança e limites conhecidos
 
-- CRUD `/agentes` e `/sessoes` **sem autenticação de operador no app**, mas bloqueado pelo Nginx desta base F0. Não publicar `app:5000` nem criar proxy alternativo que contorne esse bloqueio; isso não é RBAC.
+- CRUD `/agentes` e `/sessoes` exige login no app (401 sem credencial, 403 sem permissão, 503 sem chaves `AUTH_*`) e continua bloqueado pelo Nginx. `/auth/*` também é interno; expor qualquer dessas rotas é decisão separada. Não publicar `app:5000` nem criar proxy alternativo.
+- Rate limit de login por origem é em memória por processo; o controle durável é o atraso progressivo por conta e origem, que não deixa terceiros bloquearem o dono. Quem distribui tentativas por muitas origens só é contido pelos limites por origem e pela fila de hash; TOTP é recomendado também para operadores. Acesso ao container (CLIs) continua privilegiado e fora do login.
 - `PROVIDER_WEBHOOK_AUTH_MODE=provisioning` é bootstrap, não modo público seguro. Ingress fechado até contratos verificados e auth `enforced`.
 - App não publica porta `5000` no host. Diagnóstico interno não é API pública.
 - Crash/rollback pós-LLM pode perder ledger no fluxo não agendado, inclusive outbox; plano pós-F0 aprovado prevê scheduler antes de tráfego comercial, ainda sem ativação.
@@ -181,7 +183,7 @@ CI no GitHub Actions (`.github/workflows/ci.yml`): em cada PR e push na `main` r
 
 ## Fora da entrega atual
 
-Portal/MFA/RBAC planejado, não disponível. Calendar, agendamentos, CRM, broadcast, WhatsApp multimídia e billing automático exigem escopo/aprovação próprios. Não incluí-los como efeito lateral de hardening ou documentação.
+Portal multi-empresa, tela de login, SSO e "esqueci a senha" não estão disponíveis. Calendar, agendamentos, CRM, broadcast, WhatsApp multimídia e billing automático exigem escopo/aprovação próprios. Não incluí-los como efeito lateral de hardening ou documentação.
 
 ## Endpoints da API (app)
 
@@ -199,6 +201,30 @@ Runbook do scheduler de inbox: [`docs/inbox-scheduler-runbook.md`](docs/inbox-sc
 | GET | `/health/provider-auth` | FU-4: snapshot interno do provider, direto no app; Nginx nega |
 | GET | `/docs`, `/redoc`, `/openapi.json` | FU-4: docs FastAPI só direto em `app:5000`; Nginx nega |
 | POST | `/webhook` | Webhook de entrada da Evolution API |
+
+### Autenticação
+
+Definir ou redefinir senha exige 8 a 64 caracteres (NFC), ao menos um número, uma maiúscula e um especial. Espaços em qualquer posição, inclusive tabulações e outros espaços Unicode, são recusados, sem remoção silenciosa. Recusa → 422 com código, sem consumir o token. Login e rehash preservam senhas já cadastradas, inclusive com espaços.
+
+Toda rota de `/agentes` e `/sessoes` exige sessão (cookie `__Host-wpp_sessao` + header `X-CSRF-Token` em mutações) ou `Authorization: Bearer` de token de serviço. Corpo de credencial com campo ausente/tipo errado → 422 sem ecoar valores e sem derivação de senha no login. Login com corpo válido recusado → 401 e uma derivação; janela por origem → 429; chaves ausentes, banco indisponível ou fila de hash saturada → 503. Demais erros por rota: [AGENTS.md §7](AGENTS.md#7-api-endpoints). Permissões por papel: [AGENTS.md §7](AGENTS.md#7-api-endpoints).
+
+| Método | Rota | Descrição |
+|---|---|---|
+| POST | `/auth/login` | E-mail + senha string → sessão ou desafio TOTP; credenciais recusadas → 401 genérico; corpo inválido → 422; limite por origem → 429; indisponibilidade → 503 |
+| POST | `/auth/totp/verificar` | Desafio + código TOTP → sessão |
+| POST | `/auth/totp/enrolar`, `/auth/totp/confirmar` | Enrolamento TOTP |
+| POST | `/auth/ativar` | Token de uso único (ativação, reset de senha ou de MFA) |
+| POST | `/auth/logout` | Encerra a sessão |
+| GET | `/auth/me` | Credencial atual |
+
+Primeiro acesso (dentro do container; chaves `AUTH_*` já no `.env`, ver [§9.3](AGENTS.md#93-chaves-de-autenticação-da-api)):
+
+```bash
+docker compose exec app python -m src.auth_cli bootstrap-admin --email admin@example.invalid --actor operador
+# token exibido uma vez → POST /auth/ativar {token, senha} → POST /auth/totp/confirmar {desafio, codigo}
+docker compose exec app python -m src.auth_cli usuario criar --email pessoa@example.invalid --papel operador --actor operador
+docker compose exec app python -m src.auth_cli token criar --nome automacao --papel leitura --dias 90 --actor operador
+```
 
 ### Agentes
 

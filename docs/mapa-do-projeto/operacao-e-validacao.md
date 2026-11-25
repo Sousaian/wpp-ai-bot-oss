@@ -47,7 +47,7 @@ Imagens externas do Compose principal usam tag+digest linux/amd64. `latest@sha25
 - Bootstrap ainda monta raiz em `/workspace` para rename atômico de `.env`; isso não é bind de código `/app`. Não expor esse diretório operacional a testes.
 - App escuta internamente em `5000`, sem porta host. `APP_HOST`/`APP_PORT` não publicam porta automaticamente.
 - Nginx usa `NGINX_BIND_ADDRESS` default `127.0.0.1`, portas HTTP/HTTPS parametrizadas. Prod exige certificados; location ACME não cria webroot/mount/certificado automaticamente.
-- App público permite rotas exatas e métodos de AGENTS §7. CRUD permanece interno sem login próprio; não criar proxy alternativo para contornar a borda.
+- App público permite rotas exatas e métodos de AGENTS §7. CRUD e `/auth` permanecem internos e exigem login no app; não criar proxy alternativo para contornar a borda. Provisionar `AUTH_PASSWORD_PEPPER_KEYS` e `AUTH_TOTP_ENCRYPTION_KEYS` (AGENTS §9.3) e criar o primeiro admin com `python -m src.auth_cli bootstrap-admin` dentro do container; sem as chaves as rotas respondem 503.
 
 | Volume lógico | Destino |
 | --- | --- |
