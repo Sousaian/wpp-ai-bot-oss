@@ -175,9 +175,9 @@ async def _rehash(
     sessions: async_sessionmaker[AsyncSession], candidato: _Candidato, texto: str
 ) -> None:
     try:
-        novo_hash, versao = await senha.gerar_hash(texto)
-    except (senha.SenhaRecusada, senha.HashOcupado):
-        return  # legacy policy or saturated pool: keep the old hash, login stands
+        novo_hash, versao = await senha.rehash_verificada(texto)
+    except senha.HashOcupado:
+        return  # saturated pool: keep the old hash, login stands
     await run_auth_transaction(
         sessions,
         lambda db: auth_repo.substituir_senha_se_inalterada(

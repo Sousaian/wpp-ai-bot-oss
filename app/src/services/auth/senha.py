@@ -46,15 +46,6 @@ WORKERS = 2
 FILA_MAXIMA = 16
 ESPERA_MAXIMA = 5.0
 
-# Small blocklist of common choices; long, unique passphrases are preferred.
-BLOCKLIST = frozenset({
-    "12345678", "123456789", "1234567890", "87654321", "11111111", "00000000",
-    "password", "password1", "passw0rd", "qwertyui", "qwerty123", "abcdefgh",
-    "senha123", "senha1234", "mudar123", "trocar123", "admin123", "administrador",
-    "iloveyou", "letmein1", "welcome1", "changeme", "whatsapp", "atendimento",
-})
-
-
 class SenhaRecusada(ValueError):
     """Policy refusal with a fixed, value-free code."""
 
@@ -140,7 +131,7 @@ class Verificacao:
 
 
 def normalizar(senha: str) -> str:
-    """NFC normalization; 8..64 code points, no composition rules."""
+    """Definition policy: NFC, 8..64 code points, Nd, Lu and punctuation/symbol."""
 
     if not isinstance(senha, str):
         raise SenhaRecusada("senha_invalida")
@@ -151,8 +142,13 @@ def normalizar(senha: str) -> str:
         raise SenhaRecusada("senha_curta")
     if len(normalizada) > SENHA_MAX:
         raise SenhaRecusada("senha_longa")
-    if normalizada.casefold() in BLOCKLIST or len(set(normalizada)) < 3:
-        raise SenhaRecusada("senha_comum")
+    categorias = {unicodedata.category(c) for c in normalizada}
+    if "Nd" not in categorias:
+        raise SenhaRecusada("senha_sem_numero")
+    if "Lu" not in categorias:
+        raise SenhaRecusada("senha_sem_maiuscula")
+    if not any(c[0] in {"P", "S"} for c in categorias):
+        raise SenhaRecusada("senha_sem_especial")
     return normalizada
 
 
@@ -240,6 +236,14 @@ async def gerar_hash(senha: str) -> tuple[str, int]:
     """Policy-checked password → (PHC hash, pepper version); runs off-loop."""
 
     normalizada = normalizar(senha)
+    _pepper(settings.auth_password_pepper_current_version)
+    return await PISCINA.executar(_hash_sync, normalizada)
+
+
+async def rehash_verificada(senha: str) -> tuple[str, int]:
+    """Rehash only after successful verification; never apply definition policy."""
+
+    normalizada = unicodedata.normalize("NFC", senha)
     _pepper(settings.auth_password_pepper_current_version)
     return await PISCINA.executar(_hash_sync, normalizada)
 

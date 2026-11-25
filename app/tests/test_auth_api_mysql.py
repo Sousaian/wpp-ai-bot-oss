@@ -45,7 +45,7 @@ from tests.disposable_db import assert_disposable_database
 TEST_DATABASE_URL = os.getenv("OUTBOX_TEST_DATABASE_URL")
 REPO_ROOT = Path(os.environ.get("WPP_REPO_ROOT", Path(__file__).resolve().parents[2]))
 PEPPER = {1: SecretStr("auth-test-pepper-synthetic-0123456789abcdef")}
-SENHA = "frase longa sintetica 42"
+SENHA = "Frase longa sintetica 42!"
 BASE_URL = "https://auth.invalid"
 PROXY_IP = "172.30.0.2"
 AUTH_TABLES = ("auth_auditoria", "auth_tentativas", "auth_sessoes", "auth_tokens_uso_unico", "auth_tokens_servico", "auth_usuarios")
@@ -639,6 +639,67 @@ class AuthApiMySQLTests(unittest.IsolatedAsyncioTestCase):
              patch.object(settings, "auth_password_pepper_current_version", 1):
             self.assertEqual((await self.login(email))[1].status_code, 401)
 
+    async def test_legacy_password_login_and_rehash_after_pepper_removal(self) -> None:
+        usuario_id, email = await self.user("operador")
+        legacy = "e\u0301 antiga sem classes"
+        # Synthetic historical credential, intentionally not a definition.
+        old_hash, old_version = senha._hash_sync("é antiga sem classes")
+        await self.execute(update(AuthUsuario).where(AuthUsuario.id == usuario_id).values(
+            senha_hash=old_hash, senha_pepper_versao=old_version))
+        self.assertEqual((await self.login(email, legacy))[1].status_code, 200)
+        v2 = SecretStr("auth-test-pepper-v2-synthetic-abcdef0123456789")
+        with patch.object(settings, "auth_password_pepper_keys", {**PEPPER, 2: v2}), \
+             patch.object(settings, "auth_password_pepper_current_version", 2):
+            self.assertEqual((await self.login(email, legacy))[1].status_code, 200)
+        with patch.object(settings, "auth_password_pepper_keys", {2: v2}), \
+             patch.object(settings, "auth_password_pepper_current_version", 2):
+            self.assertEqual((await self.login(email, legacy))[1].status_code, 200)
+            self.assertEqual((await self.login(email, "errada"))[1].status_code, 401)
+
+    async def test_cli_tokens_use_definition_policy_without_consuming_on_refusal(self) -> None:
+        cases = [
+            ("Aa1!aaa", "senha_curta"), ("A1!" + "a" * 62, "senha_longa"),
+            ("A!aaaaaa", "senha_sem_numero"), ("a1!aaaaa", "senha_sem_maiuscula"),
+            ("A1 aaaaa", "senha_sem_especial"),
+        ]
+        async def cli(argv):
+            output = []
+            code = await auth_cli.run(auth_cli._parser().parse_args(argv), self.sessions, output.append)
+            self.assertEqual(code, 0, output)
+            return output[0]
+
+        async def consume(token):
+            from loguru import logger
+            logs = []
+            sink = logger.add(lambda message: logs.append(str(message)))
+            try:
+                for value, code in cases:
+                    response = await self.client().post("/auth/ativar", json={"token": token, "senha": value})
+                    self.assertEqual((response.status_code, response.json()), (422, {"detail": code}))
+                    self.assertNotIn(value, response.text)
+                    self.assertNotIn(value, "".join(logs))
+                    self.assertEqual(await self.count(
+                        AuthTokenUsoUnico, AuthTokenUsoUnico.token_hash == segredos.digest(token),
+                        AuthTokenUsoUnico.usado_em.is_(None)), 1)
+                response = await self.client().post("/auth/ativar", json={"token": token, "senha": SENHA})
+                self.assertEqual(response.status_code, 200, response.text)
+            finally:
+                logger.remove(sink)
+
+        for role in ("admin", "operador"):
+            email = f"cli-policy-{role}@example.invalid"
+            argv = (["bootstrap-admin", "--email", email] if role == "admin" else
+                    ["usuario", "criar", "--email", email, "--papel", role])
+            emitted = await cli([*argv, "--actor", "synthetic-operator"])
+            if role == "operador":
+                emitted = await cli(["usuario", "reset", str(emitted["usuario_id"]),
+                                     "--tipo", "ativacao", "--actor", "synthetic-operator"])
+            await consume(emitted["token"])
+            reset = await cli(["usuario", "reset", str(emitted["usuario_id"]),
+                               "--tipo", "senha", "--actor", "synthetic-operator"])
+            await consume(reset["token"])
+            self.assertEqual((await self.login(email))[1].status_code, 200)
+
     async def test_production_hash_parameters(self) -> None:
         hasher = PRODUCTION_HASHER
         self.assertEqual((hasher.memory_cost, hasher.time_cost, hasher.parallelism, hasher.salt_len, hasher.type),
@@ -662,7 +723,7 @@ class AuthApiMySQLTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stored.token_hash, segredos.digest(emitido.token))
         client = self.client()
         weak = await client.post("/auth/ativar", json={"token": emitido.token, "senha": "12345678"})
-        self.assertEqual((weak.status_code, weak.json()["detail"]), (422, "senha_comum"))
+        self.assertEqual((weak.status_code, weak.json()["detail"]), (422, "senha_sem_maiuscula"))
         self.assertEqual((await client.post("/auth/ativar", json={"token": emitido.token, "senha": SENHA})).status_code, 200)
         reused = await client.post("/auth/ativar", json={"token": emitido.token, "senha": SENHA + "x"})
         self.assertEqual((reused.status_code, reused.json()), (400, {"detail": "token invalido"}))
@@ -680,12 +741,12 @@ class AuthApiMySQLTests(unittest.IsolatedAsyncioTestCase):
         second = await administracao.emitir_reset(self.sessions, usuario_id=emitido.usuario_id, tipo="senha")
         self.assertEqual((await logged.get("/auth/me")).status_code, 401)
         self.assertEqual((await client.post("/auth/ativar", json={"token": first.token, "senha": SENHA})).status_code, 400)
-        new_password = "outra frase sintetica 7"
+        new_password = "Outra frase sintetica 7!"
         self.assertEqual((await client.post("/auth/ativar", json={"token": second.token, "senha": new_password})).status_code, 200)
         self.assertEqual((await self.login("novo@example.invalid"))[1].status_code, 401)
         self.assertEqual((await self.login("novo@example.invalid", new_password))[1].status_code, 200)
         # A consumed reset token cannot be replayed while the user stays active.
-        replay = await client.post("/auth/ativar", json={"token": second.token, "senha": "terceira frase sintetica"})
+        replay = await client.post("/auth/ativar", json={"token": second.token, "senha": "Terceira frase sintetica 8!"})
         self.assertEqual(replay.status_code, 400)
         self.assertEqual((await self.login("novo@example.invalid", new_password))[1].status_code, 200)
         with self.assertRaises(administracao.Recusado) as refused:
