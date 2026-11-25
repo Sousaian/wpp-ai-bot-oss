@@ -46,6 +46,7 @@ WORKERS = 2
 FILA_MAXIMA = 16
 ESPERA_MAXIMA = 5.0
 
+
 class SenhaRecusada(ValueError):
     """Policy refusal with a fixed, value-free code."""
 
