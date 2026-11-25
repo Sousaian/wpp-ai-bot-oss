@@ -3,6 +3,7 @@
 import ast
 import os
 import unittest
+import unicodedata
 from pathlib import Path
 
 from src.services.auth import senha
@@ -20,8 +21,11 @@ class PasswordPolicyTests(unittest.TestCase):
         ]
         for value in accepted:
             with self.subTest(value=value):
-                import unicodedata
-                self.assertEqual(senha.normalizar(value), unicodedata.normalize("NFC", value))
+                try:
+                    normalized = senha.normalizar(value)
+                except senha.SenhaRecusada as exc:
+                    self.fail(f"valid synthetic definition refused: {exc.code}")
+                self.assertEqual(normalized, unicodedata.normalize("NFC", value))
         refused = [
             ("Aa1!aaa", "senha_curta"),
             ("A1!" + "a" * 62, "senha_longa"),
