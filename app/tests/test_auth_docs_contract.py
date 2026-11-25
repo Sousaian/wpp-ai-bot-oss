@@ -153,13 +153,13 @@ class AuthDocsContractTests(unittest.TestCase):
     def test_password_definition_documented_and_executable(self) -> None:
         policy = section(self.agents, "- Senha definida", "- Login sem enumeração:")
         for semantic in ("NFC", "code points", "Nd", "Lu", "P*", "S*", "Espaço",
-                         "422", "sem consumir token", "Login e rehash", "Sem lista de senhas"):
+                         "422", "sem consumir token", "Login e rehash", "Sem lista de senhas", "str.isspace()", "sem remoção silenciosa"):
             self.assertIn(semantic, policy)
-        for value in ("Password1!", "É١!aaaaa", "A1! aaaa"):
+        for value in ("Password1!", "É١!aaaaa", "A1!aaaaa"):
             self.assertEqual(senha.normalizar(value), value)
         cases = (("Aa1!aaa", "senha_curta"), ("A1!" + "a" * 62, "senha_longa"),
                  ("A!aaaaaa", "senha_sem_numero"), ("a1!aaaaa", "senha_sem_maiuscula"),
-                 ("A1 aaaaa", "senha_sem_especial"), ("A1!aaaa\ud800", "senha_invalida"))
+                 ("A1 aaaaa", "senha_com_espaco"), ("A1!aa\taaa", "senha_com_espaco"), ("A1!aaaa\ud800", "senha_invalida"))
         for value, code in cases:
             self.assertIn(code, policy)
             with self.assertRaises(senha.SenhaRecusada) as caught:

@@ -204,7 +204,7 @@ Runbook do scheduler de inbox: [`docs/inbox-scheduler-runbook.md`](docs/inbox-sc
 
 ### Autenticação
 
-Definir ou redefinir senha exige 8 a 64 caracteres (NFC), ao menos um número, uma maiúscula e um especial. Espaço é permitido, sem contar como especial. Recusa → 422 com código, sem consumir o token. Senhas já cadastradas continuam válidas no login.
+Definir ou redefinir senha exige 8 a 64 caracteres (NFC), ao menos um número, uma maiúscula e um especial. Espaços em qualquer posição, inclusive tabulações e outros espaços Unicode, são recusados, sem remoção silenciosa. Recusa → 422 com código, sem consumir o token. Login e rehash preservam senhas já cadastradas, inclusive com espaços.
 
 Toda rota de `/agentes` e `/sessoes` exige sessão (cookie `__Host-wpp_sessao` + header `X-CSRF-Token` em mutações) ou `Authorization: Bearer` de token de serviço. Corpo de credencial com campo ausente/tipo errado → 422 sem ecoar valores e sem derivação de senha no login. Login com corpo válido recusado → 401 e uma derivação; janela por origem → 429; chaves ausentes, banco indisponível ou fila de hash saturada → 503. Demais erros por rota: [AGENTS.md §7](AGENTS.md#7-api-endpoints). Permissões por papel: [AGENTS.md §7](AGENTS.md#7-api-endpoints).
 
