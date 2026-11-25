@@ -47,7 +47,7 @@ from tests.disposable_db import assert_disposable_database
 TEST_DATABASE_URL = os.getenv("OUTBOX_TEST_DATABASE_URL")
 REPO_ROOT = Path(os.environ.get("WPP_REPO_ROOT", Path(__file__).resolve().parents[2]))
 PEPPER = {1: SecretStr("auth-test-pepper-synthetic-0123456789abcdef")}
-SENHA = "Frase longa sintetica 42!"
+SENHA = "FraseLongaSintetica42!"
 BASE_URL = "https://auth.invalid"
 PROXY_IP = "172.30.0.2"
 AUTH_TABLES = ("auth_auditoria", "auth_tentativas", "auth_sessoes", "auth_tokens_uso_unico", "auth_tokens_servico", "auth_usuarios")
@@ -658,11 +658,29 @@ class AuthApiMySQLTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((await self.login(email, legacy))[1].status_code, 200)
             self.assertEqual((await self.login(email, "errada"))[1].status_code, 401)
 
+    async def test_legacy_whitespace_password_survives_login_and_rehash(self) -> None:
+        usuario_id, email = await self.user("operador")
+        legacy = " E\u03011!aa\taaa\u00a0"
+        stored, version = senha._hash_sync(" É1!aa\taaa\u00a0")
+        await self.execute(update(AuthUsuario).where(AuthUsuario.id == usuario_id).values(
+            senha_hash=stored, senha_pepper_versao=version))
+        self.assertEqual((await self.login(email, legacy))[1].status_code, 200)
+        v2 = SecretStr("auth-test-pepper-v2-synthetic-abcdef0123456789")
+        with patch.object(settings, "auth_password_pepper_keys", {**PEPPER, 2: v2}), \
+             patch.object(settings, "auth_password_pepper_current_version", 2):
+            self.assertEqual((await self.login(email, legacy))[1].status_code, 200)
+        with patch.object(settings, "auth_password_pepper_keys", {2: v2}), \
+             patch.object(settings, "auth_password_pepper_current_version", 2):
+            self.assertEqual((await self.login(email, legacy))[1].status_code, 200)
+
     async def test_cli_tokens_use_definition_policy_without_consuming_on_refusal(self) -> None:
         cases = [
             ("Aa1!aaa", "senha_curta"), ("A1!" + "a" * 62, "senha_longa"),
             ("A!aaaaaa", "senha_sem_numero"), ("a1!aaaaa", "senha_sem_maiuscula"),
-            ("A1 aaaaa", "senha_sem_especial"),
+            ("A1aaaaaa", "senha_sem_especial"),
+            (" A1!aaaaa", "senha_com_espaco"), ("A1!aaaaa ", "senha_com_espaco"),
+            ("A1!aa\taaa", "senha_com_espaco"), ("A1!aa\naaa", "senha_com_espaco"),
+            ("A1!aa\u00a0aaa", "senha_com_espaco"), ("A1!aa\u3000aaa", "senha_com_espaco"),
         ]
         async def cli(argv):
             output = []
@@ -671,6 +689,7 @@ class AuthApiMySQLTests(unittest.IsolatedAsyncioTestCase):
             return output[0]
 
         async def consume(token):
+            limites.LIMITE.reset()
             logs = []
             sink = logger.add(lambda message: logs.append(str(message)))
             try:
@@ -825,12 +844,12 @@ class AuthApiMySQLTests(unittest.IsolatedAsyncioTestCase):
         second = await administracao.emitir_reset(self.sessions, usuario_id=emitido.usuario_id, tipo="senha")
         self.assertEqual((await logged.get("/auth/me")).status_code, 401)
         self.assertEqual((await client.post("/auth/ativar", json={"token": first.token, "senha": SENHA})).status_code, 400)
-        new_password = "Outra frase sintetica 7!"
+        new_password = "OutraFraseSintetica7!"
         self.assertEqual((await client.post("/auth/ativar", json={"token": second.token, "senha": new_password})).status_code, 200)
         self.assertEqual((await self.login("novo@example.invalid"))[1].status_code, 401)
         self.assertEqual((await self.login("novo@example.invalid", new_password))[1].status_code, 200)
         # A consumed reset token cannot be replayed while the user stays active.
-        replay = await client.post("/auth/ativar", json={"token": second.token, "senha": "Terceira frase sintetica 8!"})
+        replay = await client.post("/auth/ativar", json={"token": second.token, "senha": "TerceiraFraseSintetica8!"})
         self.assertEqual(replay.status_code, 400)
         self.assertEqual((await self.login("novo@example.invalid", new_password))[1].status_code, 200)
         with self.assertRaises(administracao.Recusado) as refused:
@@ -840,7 +859,7 @@ class AuthApiMySQLTests(unittest.IsolatedAsyncioTestCase):
     async def test_concurrent_activation_consumes_token_once(self) -> None:
         emitido = await administracao.criar_usuario(self.sessions, email="corrida@example.invalid", papel="leitura")
         responses = await asyncio.gather(*[
-            self.client(f"192.0.2.{n}").post("/auth/ativar", json={"token": emitido.token, "senha": f"{SENHA} {n}"})
+            self.client(f"192.0.2.{n}").post("/auth/ativar", json={"token": emitido.token, "senha": f"{SENHA}{n}"})
             for n in range(4)
         ])
         self.assertEqual(sorted(r.status_code for r in responses), [200, 400, 400, 400])

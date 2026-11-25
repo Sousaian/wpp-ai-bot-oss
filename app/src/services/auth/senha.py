@@ -133,7 +133,7 @@ class Verificacao:
 
 
 def normalizar(senha: str) -> str:
-    """Definition policy: NFC, 8..64 code points, Nd, Lu and punctuation/symbol."""
+    """Definition policy: NFC, 8..64 code points, Nd, Lu, punctuation/symbol; no whitespace."""
 
     if not segredos.texto_utf8_valido(senha):
         raise SenhaRecusada("senha_invalida")
@@ -144,6 +144,8 @@ def normalizar(senha: str) -> str:
         raise SenhaRecusada("senha_curta")
     if len(normalizada) > SENHA_MAX:
         raise SenhaRecusada("senha_longa")
+    if any(c.isspace() for c in normalizada):
+        raise SenhaRecusada("senha_com_espaco")
     categorias = {unicodedata.category(c) for c in normalizada}
     if "Nd" not in categorias:
         raise SenhaRecusada("senha_sem_numero")
