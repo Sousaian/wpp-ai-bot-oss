@@ -18,6 +18,7 @@ from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.database.repositories import auth_repo, scheduler_repo
+from src.services.auth import segredos
 
 
 EVENTOS = frozenset({
@@ -56,6 +57,8 @@ def mascarar_telefone(telefone: object) -> str:
 
 def mascarar_email(email: object) -> str:
     texto = str(email or "")
+    if not segredos.texto_utf8_valido(texto):
+        return "***"
     local, arroba, dominio = texto.partition("@")
     if not arroba:
         return "***"
