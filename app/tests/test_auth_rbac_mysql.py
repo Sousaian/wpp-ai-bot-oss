@@ -17,7 +17,7 @@ import pyotp
 from fastapi import Depends
 from sqlalchemy import func, select, text, update
 
-from src import main
+from src import auth_cli, main
 from src.database.models import Agente, AuthAuditoria, AuthUsuario, Sessao
 from src.services.auth import administracao, auditoria, limites, rbac, segredos, totp
 from src.services.auth.rbac import Permissao as P
@@ -237,7 +237,6 @@ class AuthRbacMySQLTests(base.AuthApiMySQLTests):
         refused = (await self.login(email))[1]
         self.assertEqual((refused.status_code, refused.json()), (401, {"detail": "credenciais invalidas"}))
         # reset_mfa: out-of-band token → enrolment → confirmation → login again.
-        from src import auth_cli
         emitted = []
         rc = await auth_cli.run(auth_cli._parser().parse_args([
             "usuario", "reset", str(admin_id), "--tipo", "mfa", "--actor", "synthetic-operator"
