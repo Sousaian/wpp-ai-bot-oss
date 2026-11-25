@@ -150,6 +150,22 @@ class AuthDocsContractTests(unittest.TestCase):
             self.assertIn(line, section_9_3)
             self.assertIn(line.split("=")[0].lower(), Settings.model_fields)
 
+    def test_password_definition_documented_and_executable(self) -> None:
+        policy = section(self.agents, "- Senha definida", "- Login sem enumeração:")
+        for semantic in ("NFC", "code points", "Nd", "Lu", "P*", "S*", "Espaço",
+                         "422", "sem consumir token", "Login e rehash", "Sem blocklist"):
+            self.assertIn(semantic, policy)
+        for value in ("Password1!", "É١!aaaaa", "A1! aaaa"):
+            self.assertEqual(senha.normalizar(value), value)
+        cases = (("Aa1!aaa", "senha_curta"), ("A1!" + "a" * 62, "senha_longa"),
+                 ("A!aaaaaa", "senha_sem_numero"), ("a1!aaaaa", "senha_sem_maiuscula"),
+                 ("A1 aaaaa", "senha_sem_especial"))
+        for value, code in cases:
+            self.assertIn(code, policy)
+            with self.assertRaises(senha.SenhaRecusada) as caught:
+                senha.normalizar(value)
+            self.assertEqual(caught.exception.code, code)
+
     def test_numbers_match_code(self) -> None:
         section_10_16 = section(self.agents, "### 10.16 Autenticação", "## 11.")
         self.assertEqual((contexto.SESSAO_OCIOSA.total_seconds(), contexto.SESSAO_ABSOLUTA.total_seconds()),

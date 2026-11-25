@@ -252,3 +252,15 @@ Copyright 2026 Ian Alves Sousa. Distribuído sob a [Apache License 2.0](LICENSE)
 ## Contribuições
 
 Issues e pull requests são bem-vindos. Não inclua segredos, números reais de WhatsApp ou dados de conversas em issues, testes ou exemplos.
+
+
+### Política de definição de senha
+
+Ativação e reset de senha → NFC antes da contagem de 8–64 code points,
+número Unicode `Nd`, maiúscula `Lu` e especial `P*` ou `S*`.
+Espaços são permitidos, mas não contam como especiais; NUL é recusado.
+Sem blocklist, serviço externo ou exigência de minúscula.
+CLI emite tokens, não recebe senha: validação acontece em `POST /auth/ativar`.
+Recusa → 422 com código estável, sem consumir token.
+Login e rehash preservam senhas existentes, com NFC e sem reaplicar composição.
+Argon2id, rate limit e TOTP permanecem inalterados.
