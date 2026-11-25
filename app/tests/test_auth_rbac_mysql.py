@@ -237,8 +237,14 @@ class AuthRbacMySQLTests(base.AuthApiMySQLTests):
         refused = (await self.login(email))[1]
         self.assertEqual((refused.status_code, refused.json()), (401, {"detail": "credenciais invalidas"}))
         # reset_mfa: out-of-band token → enrolment → confirmation → login again.
-        reset = await administracao.emitir_reset(self.sessions, ator="teste", usuario_id=admin_id, tipo="mfa")
-        enrol = await self.client().post("/auth/ativar", json={"token": reset.token})
+        from src import auth_cli
+        emitted = []
+        rc = await auth_cli.run(auth_cli._parser().parse_args([
+            "usuario", "reset", str(admin_id), "--tipo", "mfa", "--actor", "synthetic-operator"
+        ]), self.sessions, emitted.append)
+        self.assertEqual(rc, 0)
+        reset_token = emitted[0]["token"]
+        enrol = await self.client().post("/auth/ativar", json={"token": reset_token})
         self.assertEqual(enrol.json()["status"], "totp_enrolamento_requerido")
         self.assertEqual((await self.login(email))[1].status_code, 401)  # still refused before confirm
         await self.confirm(enrol.json(), email)
