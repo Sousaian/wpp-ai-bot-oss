@@ -122,7 +122,7 @@ class AuthApiMySQLTests(unittest.IsolatedAsyncioTestCase):
     # ── helpers ─────────────────────────────────────────────────────────
     def client(self, source: str = "198.51.100.10", base_url: str = BASE_URL) -> httpx.AsyncClient:
         client = httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=main.app, client=(source, 40000), raise_app_exceptions=False), base_url=base_url
+            transport=httpx.ASGITransport(app=main.app, client=(source, 40000)), base_url=base_url
         )
         self.clients.append(client)
         return client
@@ -701,6 +701,13 @@ class AuthApiMySQLTests(unittest.IsolatedAsyncioTestCase):
             await consume(reset["token"])
             self.assertEqual((await self.login(email))[1].status_code, 200)
 
+    def safe_client(self, source: str = "198.51.100.10") -> httpx.AsyncClient:
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=main.app, client=(source, 40000), raise_app_exceptions=False),
+            base_url=BASE_URL)
+        self.clients.append(client)
+        return client
+
     async def test_unencodable_login_inputs_are_generic_and_counted(self) -> None:
         active_id, active = await self.user("operador")
         _, pending = await self.user("leitura", "pending-utf@example.invalid", ativar=False)
@@ -720,7 +727,7 @@ class AuthApiMySQLTests(unittest.IsolatedAsyncioTestCase):
                                  {"email": "\ud800@example.invalid", "senha": SENHA},
                                  {"email": "user@exa\udfffmple.invalid", "senha": SENHA}):
                         before = counting.verifies
-                        response = await self.client(source).post(
+                        response = await self.safe_client(source).post(
                             "/auth/login", content=json.dumps(body), headers={"Content-Type": "application/json"})
                         self.assertEqual(response.status_code, 401, response.text)
                         self.assertEqual(response.json(), {"detail": "credenciais invalidas"})
@@ -742,7 +749,7 @@ class AuthApiMySQLTests(unittest.IsolatedAsyncioTestCase):
             "--papel", "operador", "--actor", "synthetic-operator"
         ]), self.sessions, emitted.append)
         token = emitted[0]["token"]
-        client = self.client()
+        client = self.safe_client()
         logs = []
         sink = logger.add(lambda message: logs.append(str(message)))
         try:
@@ -760,14 +767,16 @@ class AuthApiMySQLTests(unittest.IsolatedAsyncioTestCase):
             response = await client.post("/auth/ativar", json={"token": token, "senha": SENHA})
             self.assertEqual(response.status_code, 200)
             _, email = await self.user("operador")
-            logged, response = await self.login(email)
+            original, response = await self.login(email)
+            logged = self.safe_client()
+            logged.cookies.update(original.cookies)
             for raw in (b"caf\xe9", b"\xff", b"\xed\xa0\x80"):
                 response = await logged.post("/auth/logout", headers=[(b"x-csrf-token", raw)])
                 self.assertEqual(response.status_code, 403, response.text)
                 self.assertEqual(response.json(), {"detail": "csrf invalido"})
                 for header in ((b"cookie", b"__Host-wpp_sessao=" + raw),
                                (b"authorization", b"Bearer " + raw)):
-                    response = await self.client().get("/auth/me", headers=[header])
+                    response = await self.safe_client().get("/auth/me", headers=[header])
                     self.assertEqual((response.status_code, response.json()),
                                      (401, {"detail": "autenticacao requerida"}))
             self.assertNotIn("\ud800", "".join(logs))
