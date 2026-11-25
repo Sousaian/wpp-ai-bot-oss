@@ -49,7 +49,19 @@ def digest_se_valido(tipo: Tipo, token: object) -> str | None:
     return digest(token)
 
 
+def texto_utf8_valido(texto: object) -> bool:
+    """Reject isolated surrogates before hashing, SQL or audit serialization."""
+
+    if not isinstance(texto, str):
+        return False
+    try:
+        texto.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 def iguais(token: str | None, esperado_hash: str | None) -> bool:
-    if not token or not esperado_hash:
+    if not token or not esperado_hash or not token.isascii():
         return False
     return hmac.compare_digest(digest(token), esperado_hash)

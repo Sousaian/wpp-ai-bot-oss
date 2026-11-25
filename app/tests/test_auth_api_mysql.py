@@ -9,6 +9,7 @@ synthetic data (``*.invalid`` e-mails). argon2 runs with a cheap cost here;
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 import os
 import re
@@ -145,7 +146,7 @@ class AuthApiMySQLTests(unittest.IsolatedAsyncioTestCase):
     # ── helpers ─────────────────────────────────────────────────────────
     def client(self, source: str = "198.51.100.10", base_url: str = BASE_URL) -> httpx.AsyncClient:
         client = httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=main.app, client=(source, 40000)), base_url=base_url
+            transport=httpx.ASGITransport(app=main.app, client=(source, 40000), raise_app_exceptions=False), base_url=base_url
         )
         self.clients.append(client)
         return client
@@ -732,6 +733,80 @@ class AuthApiMySQLTests(unittest.IsolatedAsyncioTestCase):
                                "--tipo", "senha", "--actor", "synthetic-operator"])
             await consume(reset["token"], role, email)
             self.assertEqual((await self.login(email))[1].status_code, 200)
+
+    async def test_unencodable_login_inputs_are_generic_and_counted(self) -> None:
+        active_id, active = await self.user("operador")
+        _, pending = await self.user("leitura", "pending-utf@example.invalid", ativar=False)
+        _, delayed = await self.user("leitura", "delayed-utf@example.invalid")
+        source = "192.0.2.155"
+        for _ in range(5):
+            await self.login(delayed, "wrong", source)
+        counting = CountingHasher(time_cost=1, memory_cost=8, parallelism=1, type=Type.ID)
+        logs = []
+        sink = logger.add(lambda message: logs.append(str(message)))
+        bad_password = "A1!aaaa\ud800"
+        try:
+            with patch.object(senha, "HASHER", counting):
+                senha._dummy()
+                for email in (active, "unknown@example.invalid", pending, delayed):
+                    for body in ({"email": email, "senha": bad_password},
+                                 {"email": "\ud800@example.invalid", "senha": SENHA},
+                                 {"email": "user@exa\udfffmple.invalid", "senha": SENHA}):
+                        before = counting.verifies
+                        response = await self.client(source).post(
+                            "/auth/login", content=json.dumps(body), headers={"Content-Type": "application/json"})
+                        self.assertEqual(response.status_code, 401, response.text)
+                        self.assertEqual(response.json(), {"detail": "credenciais invalidas"})
+                        self.assertEqual(counting.verifies - before, 1)
+            async with self.sessions() as db:
+                attempt = (await db.execute(select(AuthTentativa).where(
+                    AuthTentativa.usuario_id == active_id, AuthTentativa.origem == source))).scalar_one()
+            self.assertEqual(attempt.falhas, 1)  # unusable text counts as a normal wrong password
+            self.assertNotIn(bad_password, "".join(logs))
+            self.assertNotIn("\ud800", "".join(logs))
+            self.assertNotIn("\udfff", "".join(logs))
+        finally:
+            logger.remove(sink)
+
+    async def test_unencodable_activation_tokens_and_non_ascii_credentials_are_inert(self) -> None:
+        emitted = []
+        await auth_cli.run(auth_cli._parser().parse_args([
+            "usuario", "criar", "--email", "utf-new@example.invalid",
+            "--papel", "operador", "--actor", "synthetic-operator"
+        ]), self.sessions, emitted.append)
+        token = emitted[0]["token"]
+        client = self.client()
+        logs = []
+        sink = logger.add(lambda message: logs.append(str(message)))
+        try:
+            for value in ("A1!aaaa\ud800", "A1!aaaa\udfff"):
+                response = await client.post("/auth/ativar", content=json.dumps({"token": token, "senha": value}),
+                                             headers={"Content-Type": "application/json"})
+                self.assertEqual(response.status_code, 422, response.text)
+                self.assertEqual(response.json(), {"detail": "senha_invalida"})
+                self.assertEqual(await self.count(AuthTokenUsoUnico,
+                    AuthTokenUsoUnico.token_hash == segredos.digest(token),
+                    AuthTokenUsoUnico.usado_em.is_(None)), 1)
+            response = await client.post("/auth/ativar", content=json.dumps({"token": "wpa_\ud800", "senha": SENHA}),
+                                         headers={"Content-Type": "application/json"})
+            self.assertEqual((response.status_code, response.json()), (400, {"detail": "token invalido"}))
+            response = await client.post("/auth/ativar", json={"token": token, "senha": SENHA})
+            self.assertEqual(response.status_code, 200)
+            _, email = await self.user("operador")
+            logged, response = await self.login(email)
+            for raw in (b"caf\xe9", b"\xff", b"\xed\xa0\x80"):
+                response = await logged.post("/auth/logout", headers=[(b"x-csrf-token", raw)])
+                self.assertEqual(response.status_code, 403, response.text)
+                self.assertEqual(response.json(), {"detail": "csrf invalido"})
+                for header in ((b"cookie", b"__Host-wpp_sessao=" + raw),
+                               (b"authorization", b"Bearer " + raw)):
+                    response = await self.client().get("/auth/me", headers=[header])
+                    self.assertEqual((response.status_code, response.json()),
+                                     (401, {"detail": "autenticacao requerida"}))
+            self.assertNotIn("\ud800", "".join(logs))
+            self.assertNotIn("\udfff", "".join(logs))
+        finally:
+            logger.remove(sink)
 
     async def test_production_hash_parameters(self) -> None:
         hasher = PRODUCTION_HASHER
