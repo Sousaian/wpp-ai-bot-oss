@@ -29,6 +29,7 @@ from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatc
 from loguru import logger
 
 from src.config import settings
+from src.services.auth import segredos
 
 
 SENHA_MIN = 8
@@ -134,7 +135,7 @@ class Verificacao:
 def normalizar(senha: str) -> str:
     """Definition policy: NFC, 8..64 code points, Nd, Lu and punctuation/symbol."""
 
-    if not isinstance(senha, str):
+    if not segredos.texto_utf8_valido(senha):
         raise SenhaRecusada("senha_invalida")
     normalizada = unicodedata.normalize("NFC", senha)
     if "\x00" in normalizada:
@@ -205,7 +206,7 @@ def exigir_capacidade() -> None:
 
 def _verify_sync(senha: str | None, senha_hash: str | None, versao: int | None) -> Verificacao:
     usable = bool(
-        isinstance(senha, str)
+        segredos.texto_utf8_valido(senha)
         and senha_hash
         and versao is not None
         and versao in settings.auth_password_pepper_keys

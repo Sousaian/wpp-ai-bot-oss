@@ -59,7 +59,7 @@ class _Candidato:
 def canonicalizar_email(email: object) -> str:
     """strip + NFC + lowercase; the canonical form is the UNIQUE key."""
 
-    if not isinstance(email, str):
+    if not segredos.texto_utf8_valido(email):
         raise EmailInvalido("email_invalido")
     canonico = unicodedata.normalize("NFC", email.strip()).lower()
     if len(canonico) > EMAIL_MAX or not _EMAIL.fullmatch(canonico):
