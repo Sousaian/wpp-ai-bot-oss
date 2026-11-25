@@ -153,13 +153,13 @@ class AuthDocsContractTests(unittest.TestCase):
     def test_password_definition_documented_and_executable(self) -> None:
         policy = section(self.agents, "- Senha definida", "- Login sem enumeração:")
         for semantic in ("NFC", "code points", "Nd", "Lu", "P*", "S*", "Espaço",
-                         "422", "sem consumir token", "Login e rehash", "Sem blocklist"):
+                         "422", "sem consumir token", "Login e rehash", "Sem lista de senhas"):
             self.assertIn(semantic, policy)
         for value in ("Password1!", "É١!aaaaa", "A1! aaaa"):
             self.assertEqual(senha.normalizar(value), value)
         cases = (("Aa1!aaa", "senha_curta"), ("A1!" + "a" * 62, "senha_longa"),
                  ("A!aaaaaa", "senha_sem_numero"), ("a1!aaaaa", "senha_sem_maiuscula"),
-                 ("A1 aaaaa", "senha_sem_especial"))
+                 ("A1 aaaaa", "senha_sem_especial"), ("A1!aaaa\ud800", "senha_invalida"))
         for value, code in cases:
             self.assertIn(code, policy)
             with self.assertRaises(senha.SenhaRecusada) as caught:
@@ -180,7 +180,7 @@ class AuthDocsContractTests(unittest.TestCase):
                       f"e espera máxima de {senha.ESPERA_MAXIMA:.0f} s", section_10_16)
         self.assertIn(f"Teto de memória de hash: {senha.WORKERS * hasher.memory_cost // 1024} MiB", section_10_16)
         self.assertIn(f"TTL {origem.RESOLUCAO_TTL_SEGUNDOS:.0f} s", section_10_16)
-        self.assertIn(f"{senha.SENHA_MIN}–{senha.SENHA_MAX} caracteres", section_10_16)
+        self.assertIn(f"{senha.SENHA_MIN}–{senha.SENHA_MAX} code points", section_10_16)
         self.assertIn(f"{limites.FALHAS_LIVRES} falhas livres, depois {limites.ATRASO_BASE.seconds} s dobrando "
                       f"até {limites.ATRASO_MAXIMO.seconds // 60} min", section_10_16)
         self.assertIn(f"a cada {limites.SINAL_FALHAS_CONTA} falhas seguidas", section_10_16)

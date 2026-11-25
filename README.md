@@ -204,6 +204,8 @@ Runbook do scheduler de inbox: [`docs/inbox-scheduler-runbook.md`](docs/inbox-sc
 
 ### Autenticação
 
+Definir ou redefinir senha exige 8 a 64 caracteres (NFC), ao menos um número, uma maiúscula e um especial. Espaço é permitido, sem contar como especial. Recusa → 422 com código, sem consumir o token. Senhas já cadastradas continuam válidas no login.
+
 Toda rota de `/agentes` e `/sessoes` exige sessão (cookie `__Host-wpp_sessao` + header `X-CSRF-Token` em mutações) ou `Authorization: Bearer` de token de serviço. Corpo de credencial com campo ausente/tipo errado → 422 sem ecoar valores e sem derivação de senha no login. Login com corpo válido recusado → 401 e uma derivação; janela por origem → 429; chaves ausentes, banco indisponível ou fila de hash saturada → 503. Demais erros por rota: [AGENTS.md §7](AGENTS.md#7-api-endpoints). Permissões por papel: [AGENTS.md §7](AGENTS.md#7-api-endpoints).
 
 | Método | Rota | Descrição |
@@ -252,15 +254,3 @@ Copyright 2026 Ian Alves Sousa. Distribuído sob a [Apache License 2.0](LICENSE)
 ## Contribuições
 
 Issues e pull requests são bem-vindos. Não inclua segredos, números reais de WhatsApp ou dados de conversas em issues, testes ou exemplos.
-
-
-### Política de definição de senha
-
-Ativação e reset de senha → NFC antes da contagem de 8–64 code points,
-número Unicode `Nd`, maiúscula `Lu` e especial `P*` ou `S*`.
-Espaços são permitidos, mas não contam como especiais; NUL é recusado.
-Sem blocklist, serviço externo ou exigência de minúscula.
-CLI emite tokens, não recebe senha: validação acontece em `POST /auth/ativar`.
-Recusa → 422 com código estável, sem consumir token.
-Login e rehash preservam senhas existentes, com NFC e sem reaplicar composição.
-Argon2id, rate limit e TOTP permanecem inalterados.

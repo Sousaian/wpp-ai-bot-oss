@@ -36,7 +36,7 @@ Base `main` = `dev` = `5908a94`, snapshot documental de 2026-11-09: F0 integrado
 | [services/evolution_client.py](../../app/src/services/evolution_client.py) | HTTP multi-instância, mensagens/presença |
 | [services/chatwoot_client.py](../../app/src/services/chatwoot_client.py) | Contatos, conversas, mensagens e contrato provider |
 | [services/webhook_auth.py](../../app/src/services/webhook_auth.py) | Bearer Evolution e criptografia dos callbacks Chatwoot |
-| [services/auth/](../../app/src/services/auth/) | `contexto` (credencial/CSRF), `origem` (IP real atrás do proxy), `rbac` (papéis/permissões), `senha` (argon2id+pepper), `sessao` (login/TOTP/tokens), `totp`, `limites`, `auditoria`, `administracao` (CLI) |
+| [services/auth/](../../app/src/services/auth/) | `contexto` (credencial/CSRF), `origem` (IP real atrás do proxy), `rbac` (papéis/permissões), `senha` (política de definição, hash e rehash argon2id+pepper), `sessao` (login/TOTP/tokens), `totp`, `limites`, `auditoria`, `administracao` (CLI) |
 | [services/provider_auth_bootstrap.py](../../app/src/services/provider_auth_bootstrap.py) | Instalação/auditoria/probes e snapshot provider |
 | [services/handoff_manager.py](../../app/src/services/handoff_manager.py) | Handoff compatível direct/outbox não agendado |
 | [services/delivery_adapters.py](../../app/src/services/delivery_adapters.py) | Decoders/payloads e operações remotas versionadas |
@@ -123,15 +123,3 @@ Não deslocar SQL de negócio para router/service novo. [Mapa de dados](dados.md
 | Agente não usa scheduler | Opt-in → flags/estado/epochs → frota |
 | Health lento | main → pool/DB → caches/frota → snapshot |
 | Processo não encerra | app_server/watchdog → quiescência → deadlines/heartbeat |
-
-
-### Política de definição de senha
-
-Ativação e reset de senha → NFC antes da contagem de 8–64 code points,
-número Unicode `Nd`, maiúscula `Lu` e especial `P*` ou `S*`.
-Espaços são permitidos, mas não contam como especiais; NUL é recusado.
-Sem blocklist, serviço externo ou exigência de minúscula.
-CLI emite tokens, não recebe senha: validação acontece em `POST /auth/ativar`.
-Recusa → 422 com código estável, sem consumir token.
-Login e rehash preservam senhas existentes, com NFC e sem reaplicar composição.
-Argon2id, rate limit e TOTP permanecem inalterados.
