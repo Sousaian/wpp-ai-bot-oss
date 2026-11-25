@@ -25,7 +25,7 @@ from src.database.repositories import (
 from src.database.unit_of_work import UnitOfWork
 from src.services import evolution_orchestrator, llm_client, scheduler_observability
 from src.services.turn_processor import TurnProcessor
-from tests import replica_fixtures
+from tests import auth_fixtures, replica_fixtures
 from tests.disposable_db import assert_disposable_database
 from tests.test_handoff_terminal_mysql import TABLES
 from tests.test_turn_processor_mysql import FakeLLM, RecordingConsumer, _no_presence
@@ -109,6 +109,7 @@ class Ticket08RehearsalMySQLTests(unittest.IsolatedAsyncioTestCase):
             async with self.sessions() as db:
                 yield db
         main.app.dependency_overrides[get_db] = db_override
+        auth_fixtures.autenticar_como(main.app)  # AUTH-1: admin principal
         main.reset_health_observability_caches()
 
         async def check_db_connection() -> bool:

@@ -7,6 +7,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config import settings
+from src.services.auth.contexto import exigir_admin
 from src.database import db_errors
 from src.database.connection import get_db
 from src.database.repositories import (
@@ -71,7 +72,11 @@ class OperacaoSessaoResponseSchema(BaseModel):
     telefone: str
 
 
-router = APIRouter(prefix="/sessoes", tags=["sessoes"])
+# AUTH-1: every route of this router requires an authenticated admin;
+# a route added later inherits the guard (fail closed).
+router = APIRouter(
+    prefix="/sessoes", tags=["sessoes"], dependencies=[Depends(exigir_admin)]
+)
 
 
 async def _lock_runtime_authority(db: AsyncSession) -> None:
