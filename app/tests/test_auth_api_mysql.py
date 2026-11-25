@@ -21,6 +21,7 @@ from unittest.mock import patch
 import httpx
 from argon2 import PasswordHasher, Type
 from fastapi.routing import APIRoute
+from loguru import logger
 from pydantic import SecretStr
 from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -669,7 +670,6 @@ class AuthApiMySQLTests(unittest.IsolatedAsyncioTestCase):
             return output[0]
 
         async def consume(token):
-            from loguru import logger
             logs = []
             sink = logger.add(lambda message: logs.append(str(message)))
             try:
