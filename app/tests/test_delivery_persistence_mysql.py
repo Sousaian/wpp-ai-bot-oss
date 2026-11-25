@@ -39,6 +39,7 @@ from src.database.repositories import (
     sessao_repo,
     usage_reconciliation_repo,
 )
+from tests import auth_fixtures
 
 
 TEST_DATABASE_URL = os.getenv("OUTBOX_TEST_DATABASE_URL")
@@ -906,7 +907,7 @@ class DeliveryPersistenceMySQLTests(unittest.IsolatedAsyncioTestCase):
             response = await sessoes_router.retomar_sessao(
                 telefone=telefone,
                 agente_id=self.agente_id,
-                db=db,
+                db=db, principal=auth_fixtures.ADMIN
             )
             await db.commit()
         self.assertEqual(response["status"], "resumed")
@@ -938,7 +939,7 @@ class DeliveryPersistenceMySQLTests(unittest.IsolatedAsyncioTestCase):
             await sessoes_router.retomar_sessao(
                 telefone=telefone,
                 agente_id=self.agente_id,
-                db=db,
+                db=db, principal=auth_fixtures.ADMIN
             )
             await db.commit()
 
@@ -967,7 +968,7 @@ class DeliveryPersistenceMySQLTests(unittest.IsolatedAsyncioTestCase):
                 await sessoes_router.deletar_sessao(
                     telefone=telefone,
                     agente_id=self.agente_id,
-                    db=db,
+                    db=db, principal=auth_fixtures.ADMIN
                 )
             self.assertEqual(raised.exception.status_code, 409)
 
@@ -986,7 +987,7 @@ class DeliveryPersistenceMySQLTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(HTTPException) as raised:
                 await agentes_router.deletar_agente(
                     agente_id=self.agente_id,
-                    db=db,
+                    db=db, principal=auth_fixtures.ADMIN
                 )
             self.assertEqual(raised.exception.status_code, 409)
 

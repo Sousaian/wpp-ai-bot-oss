@@ -1,10 +1,12 @@
-"""AUTH-1: /auth — login, logout, me and one-time-token activation/reset.
+"""AUTH-1/2: /auth — login, TOTP, logout, me and one-time-token flows.
 
 API only. Credential endpoints share a per-source window (429) and every
 login failure returns the same 401 body. The session token travels only in
 the ``__Host-`` cookie (HttpOnly, Secure, SameSite=Strict, Path=/); the
-CSRF token is returned once in the login body and must accompany every
-cookie-authenticated mutation as ``X-CSRF-Token``.
+CSRF token is returned once with the session and must accompany every
+cookie-authenticated mutation as ``X-CSRF-Token``. Users with confirmed TOTP
+(always every admin) get a body-only challenge from ``/login`` and the
+session from ``/totp/verificar``.
 """
 
 from __future__ import annotations
@@ -39,14 +41,33 @@ class LoginSchema(BaseModel):
 
 
 class LoginResponseSchema(BaseModel):
-    csrf_token: str
+    """Either a session (cookie + csrf_token) or a TOTP challenge."""
+
+    mfa_requerido: bool
+    csrf_token: str | None = None
+    papel: str | None = None
+    desafio: str | None = None
     expira_em: datetime
-    papel: str
 
 
 class AtivarSchema(BaseModel):
     token: str
-    senha: str
+    # Not used by reset_mfa tokens.
+    senha: str | None = None
+
+
+class CodigoSchema(BaseModel):
+    desafio: str
+    codigo: str
+
+
+class EnrolamentoResponseSchema(BaseModel):
+    status: str
+    desafio: str | None = None
+    expira_em: datetime | None = None
+    # Shown once; the client renders it as a QR code. Never logged.
+    totp_segredo: str | None = None
+    totp_uri: str | None = None
 
 
 class StatusSchema(BaseModel):
@@ -83,6 +104,15 @@ async def _limitar(request: Request, escopo: str) -> str:
     return ip
 
 
+def _enrolamento(iniciado: sessao.EnrolamentoIniciado | None, status: str) -> EnrolamentoResponseSchema:
+    if iniciado is None:
+        return EnrolamentoResponseSchema(status=status)
+    return EnrolamentoResponseSchema(
+        status="totp_enrolamento_requerido", desafio=iniciado.desafio, expira_em=iniciado.expira_em,
+        totp_segredo=iniciado.segredo, totp_uri=iniciado.uri,
+    )
+
+
 def _definir_cookie(response: Response, emitida: sessao.SessaoEmitida) -> None:
     response.set_cookie(
         SESSION_COOKIE,
@@ -104,28 +134,100 @@ async def login(
 ):
     exigir_configuracao()
     ip = await _limitar(request, "login")
+    response.headers["Cache-Control"] = "no-store"
     try:
-        emitida = await sessao.login(
+        resultado = await sessao.login(
             sessions, email=dados.email, senha_informada=dados.senha, origem_ip=ip
         )
     except senha.HashOcupado:
         raise _ocupado() from None
     except sessao.CredenciaisInvalidas:
         raise HTTPException(status_code=401, detail=CREDENCIAIS_INVALIDAS) from None
-    _definir_cookie(response, emitida)
+    if isinstance(resultado, sessao.DesafioMfa):
+        return LoginResponseSchema(mfa_requerido=True, desafio=resultado.desafio, expira_em=resultado.expira_em)
+    _definir_cookie(response, resultado)
+    return LoginResponseSchema(
+        mfa_requerido=False, csrf_token=resultado.csrf_token, papel=resultado.papel,
+        expira_em=resultado.expira_em,
+    )
+
+
+@router.post("/totp/verificar", response_model=LoginResponseSchema)
+async def verificar_totp(
+    dados: CodigoSchema,
+    request: Request,
+    response: Response,
+    sessions: async_sessionmaker[AsyncSession] = Depends(get_auth_sessions),
+):
+    """Second login step: challenge + TOTP code → session cookie."""
+
+    exigir_configuracao()
+    ip = await _limitar(request, "totp")
     response.headers["Cache-Control"] = "no-store"
-    return LoginResponseSchema(csrf_token=emitida.csrf_token, expira_em=emitida.expira_em, papel=emitida.papel)
+    try:
+        emitida = await sessao.verificar_totp(
+            sessions, desafio=dados.desafio, codigo=dados.codigo, origem_ip=ip
+        )
+    except sessao.CodigoInvalido:
+        raise HTTPException(status_code=401, detail="codigo invalido") from None
+    _definir_cookie(response, emitida)
+    return LoginResponseSchema(
+        mfa_requerido=False, csrf_token=emitida.csrf_token, papel=emitida.papel, expira_em=emitida.expira_em,
+    )
+
+
+@router.post("/totp/enrolar", response_model=EnrolamentoResponseSchema)
+async def enrolar_totp(
+    request: Request,
+    response: Response,
+    principal: Principal = Depends(autenticar),
+    sessions: async_sessionmaker[AsyncSession] = Depends(get_auth_sessions),
+):
+    """Voluntary TOTP for a logged-in user that has none (admins always have it)."""
+
+    if principal.tipo != "usuario":
+        raise HTTPException(status_code=400, detail="enrolamento requer sessao")
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        iniciado = await sessao.iniciar_enrolamento(
+            sessions, usuario_id=principal.id, origem_ip=principal.origem_ip
+        )
+    except sessao.EnrolamentoNaoPermitido:
+        raise HTTPException(status_code=409, detail="totp ja configurado") from None
+    return _enrolamento(iniciado, "totp_enrolamento_requerido")
+
+
+@router.post("/totp/confirmar", response_model=StatusSchema)
+async def confirmar_totp(
+    dados: CodigoSchema,
+    request: Request,
+    sessions: async_sessionmaker[AsyncSession] = Depends(get_auth_sessions),
+):
+    """Finish an enrolment (activation, reset_mfa or voluntary)."""
+
+    exigir_configuracao()
+    ip = await _limitar(request, "totp")
+    try:
+        status = await sessao.confirmar_totp(
+            sessions, desafio=dados.desafio, codigo=dados.codigo, origem_ip=ip
+        )
+    except sessao.CodigoInvalido:
+        raise HTTPException(status_code=401, detail="codigo invalido") from None
+    return StatusSchema(status=f"totp_confirmado:{status}")
 
 
 @router.post("/logout", response_model=StatusSchema)
 async def logout(
+    request: Request,
     response: Response,
     principal: Principal = Depends(autenticar),
     sessions: async_sessionmaker[AsyncSession] = Depends(get_auth_sessions),
 ):
     if principal.sessao_id is None:
         raise HTTPException(status_code=400, detail="logout requer sessao")
-    await sessao.logout(sessions, sessao_id=principal.sessao_id)
+    await sessao.logout(
+        sessions, sessao_id=principal.sessao_id, usuario_id=principal.id, origem_ip=principal.origem_ip
+    )
     response.delete_cookie(SESSION_COOKIE, path="/", secure=True, httponly=True, samesite="strict")
     return StatusSchema(status="encerrada")
 
@@ -159,22 +261,26 @@ async def me(
     return result
 
 
-@router.post("/ativar", response_model=StatusSchema)
+@router.post("/ativar", response_model=EnrolamentoResponseSchema)
 async def ativar(
     dados: AtivarSchema,
     request: Request,
+    response: Response,
     sessions: async_sessionmaker[AsyncSession] = Depends(get_auth_sessions),
 ):
-    """Consume an out-of-band activation or password-reset token."""
+    """Consume an out-of-band activation, password-reset or MFA-reset token."""
 
     exigir_configuracao()
-    await _limitar(request, "ativar")
+    ip = await _limitar(request, "ativar")
+    response.headers["Cache-Control"] = "no-store"
     try:
-        await sessao.usar_token(sessions, token=dados.token, nova_senha=dados.senha)
+        iniciado = await sessao.usar_token(
+            sessions, token=dados.token, nova_senha=dados.senha, origem_ip=ip
+        )
     except sessao.TokenInvalido:
         raise HTTPException(status_code=400, detail="token invalido") from None
     except senha.HashOcupado:
         raise _ocupado() from None
     except senha.SenhaRecusada as exc:
         raise HTTPException(status_code=422, detail=exc.code) from None
-    return StatusSchema(status="senha_definida")
+    return _enrolamento(iniciado, "senha_definida")

@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.database import db_errors
 from src.database.models import (
+    AuthAuditoria,
     AuthSessao,
     AuthTentativa,
     AuthTokenServico,
@@ -411,3 +412,45 @@ async def revogar_tokens_uso_unico(db: AsyncSession, *, usuario_id: int, agora: 
         .execution_options(synchronize_session=False)
     )
     return int(result.rowcount or 0)
+
+
+# ── auditoria ──────────────────────────────────────────────────────────────
+async def registrar_auditoria(
+    db: AsyncSession,
+    *,
+    evento: str,
+    resultado: str,
+    ator_tipo: str,
+    ator_id: int | None = None,
+    ator_rotulo: str | None = None,
+    alvo_tipo: str | None = None,
+    alvo_id: str | None = None,
+    origem_ip: str | None = None,
+    detalhe: dict[str, object] | None = None,
+) -> None:
+    """Insert only (leaf, no FK); services/auth/auditoria.py allowlists fields."""
+
+    db.add(
+        AuthAuditoria(
+            evento=evento,
+            resultado=resultado,
+            ator_tipo=ator_tipo,
+            ator_id=ator_id,
+            ator_rotulo=ator_rotulo,
+            alvo_tipo=alvo_tipo,
+            alvo_id=alvo_id,
+            origem_ip=origem_ip,
+            detalhe=detalhe,
+        )
+    )
+    await db.flush()
+
+
+async def limpar_totp(db: AsyncSession, usuario) -> None:
+    """Caller holds the user X lock."""
+
+    usuario.totp_segredo_cifrado = None
+    usuario.totp_chave_versao = None
+    usuario.totp_confirmado_em = None
+    usuario.totp_ultimo_passo = None
+    await db.flush()

@@ -21,6 +21,7 @@ from src.database.repositories import agent_scheduler_repo, scheduler_repo
 from src.routers import agentes as agentes_router
 from src.services import evolution_orchestrator
 from src.services.provider_auth_bootstrap import ReadinessReport
+from tests import auth_fixtures
 from tests import test_scheduler_drain_mysql as drain
 
 
@@ -323,7 +324,7 @@ class AgentSchedulerOptInMySQLTests(drain.SchedulerDrainMySQLTests):
                 "numero_notificacao": "0", "chatwoot_inbox_id": 7, "inbox_scheduler_enabled": True}
         async with self.sessions() as db:
             created = await agentes_router.criar_agente(
-                agentes_router.AgenteCreateSchema.model_validate(body), db)
+                agentes_router.AgenteCreateSchema.model_validate(body), db, principal=auth_fixtures.ADMIN)
             await db.commit()
             agent = created.id
         self.assertFalse(await self._flag(agent))
@@ -333,17 +334,17 @@ class AgentSchedulerOptInMySQLTests(drain.SchedulerDrainMySQLTests):
             with self.assertRaises(HTTPException) as caught:
                 await agentes_router.atualizar_agente(
                     agent, agentes_router.AgenteUpdateSchema.model_validate(
-                        {"inbox_scheduler_enabled": True}), db)
+                        {"inbox_scheduler_enabled": True}), db, principal=auth_fixtures.ADMIN)
             self.assertEqual(caught.exception.status_code, 400)
         async with self.sessions() as db:
             await agentes_router.atualizar_agente(agent, agentes_router.AgenteUpdateSchema.model_validate(
-                {"nome": "t086 renamed", "inbox_scheduler_enabled": True}), db)
+                {"nome": "t086 renamed", "inbox_scheduler_enabled": True}), db, principal=auth_fixtures.ADMIN)
             await db.commit()
         self.assertFalse(await self._flag(agent))
         await self._opt_in(agent)
         async with self.sessions() as db:
             await agentes_router.atualizar_agente(agent, agentes_router.AgenteUpdateSchema.model_validate(
-                {"limite_mensal_creditos": Decimal("1"), "inbox_scheduler_enabled": False}), db)
+                {"limite_mensal_creditos": Decimal("1"), "inbox_scheduler_enabled": False}), db, principal=auth_fixtures.ADMIN)
             await db.commit()
         self.assertTrue(await self._flag(agent))
         paths = {route.path for route in agentes_router.router.routes}
@@ -408,7 +409,7 @@ class AgentSchedulerOptInMySQLTests(drain.SchedulerDrainMySQLTests):
         async with self.sessions() as db:
             try:
                 await agentes_router.atualizar_agente(
-                    agent, agentes_router.AgenteUpdateSchema.model_validate(body), db)
+                    agent, agentes_router.AgenteUpdateSchema.model_validate(body), db, principal=auth_fixtures.ADMIN)
                 await db.commit()
                 return 200
             except HTTPException as exc:

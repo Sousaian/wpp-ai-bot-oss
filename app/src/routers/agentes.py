@@ -7,7 +7,9 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config import settings
-from src.services.auth.contexto import exigir_admin
+from src.services.auth import auditoria
+from src.services.auth.contexto import Principal, get_auth_sessions, proibido
+from src.services.auth.rbac import CAMPOS_OPERACIONAIS, Permissao as P, exigir, exigir_rota_declarada, pode
 from src.database.connection import get_db
 from src.database import db_errors
 from src.database.repositories import (
@@ -92,10 +94,10 @@ class AgenteConsumoResponseSchema(BaseModel):
     percentual_franquia_mensal: Decimal | None
 
 
-# AUTH-1: every route of this router requires an authenticated admin;
-# a route added later inherits the guard (fail closed).
+# AUTH-2: every route declares exactly one ``exigir(...)``; the router guard
+# refuses (403) a route added without one (fail closed).
 router = APIRouter(
-    prefix="/agentes", tags=["agentes"], dependencies=[Depends(exigir_admin)]
+    prefix="/agentes", tags=["agentes"], dependencies=[Depends(exigir_rota_declarada)]
 )
 
 
@@ -124,15 +126,30 @@ def _validar_modelo_llm(modelo_llm: str) -> None:
         raise HTTPException(status_code=422, detail="modelo_llm nao permitido para cadastro")
 
 
+def _visivel(principal: Principal, agente) -> AgenteResponseSchema:
+    """Without sessao.ler_telefone (leitura) the legacy phone is masked too."""
+
+    resposta = AgenteResponseSchema.model_validate(agente)
+    if not pode(principal, P.SESSAO_LER_TELEFONE):
+        resposta = resposta.model_copy(
+            update={"numero_notificacao": auditoria.mascarar_telefone(resposta.numero_notificacao)}
+        )
+    return resposta
+
+
 @router.get("", response_model=list[AgenteResponseSchema])
-async def listar_agentes(db: AsyncSession = Depends(get_db)):
-    return await agente_repo.get_all(db)
+async def listar_agentes(
+    db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(exigir(P.AGENTE_LER)),
+):
+    return [_visivel(principal, agente) for agente in await agente_repo.get_all(db)]
 
 
 @router.post("", response_model=AgenteResponseSchema, status_code=status.HTTP_201_CREATED)
 async def criar_agente(
     dados: AgenteCreateSchema,
     db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(exigir(P.AGENTE_CRIAR)),
 ):
     payload = dados.model_dump()
     payload["modelo_llm"] = _normalizar_modelo_llm(
@@ -142,21 +159,27 @@ async def criar_agente(
     _validar_modelo_llm(payload["modelo_llm"])
 
     try:
-        return await agente_repo.create(db, payload)
+        agente = await agente_repo.create(db, payload)
     except IntegrityError:
         await db.rollback()
         raise HTTPException(status_code=409, detail="instance_name ja cadastrado")
+    await auditoria.registrar(
+        db, "agente_criado", **auditoria.ator(principal), alvo_tipo="agente", alvo_id=agente.id,
+        detalhe={"campos": sorted(payload)},
+    )
+    return agente
 
 
 @router.get("/{agente_id}", response_model=AgenteResponseSchema)
 async def detalhar_agente(
     agente_id: int,
     db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(exigir(P.AGENTE_LER)),
 ):
     agente = await agente_repo.get_by_id(db, agente_id)
     if not agente:
         raise HTTPException(status_code=404, detail="Agente nao encontrado")
-    return agente
+    return _visivel(principal, agente)
 
 
 @router.put("/{agente_id}", response_model=AgenteResponseSchema)
@@ -164,10 +187,21 @@ async def atualizar_agente(
     agente_id: int,
     dados: AgenteUpdateSchema,
     db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(exigir(P.AGENTE_EDITAR, P.AGENTE_EDITAR_OPERACIONAL)),
+    sessions=Depends(get_auth_sessions),
 ):
     payload = dados.model_dump(exclude_unset=True)
     if not payload:
         raise HTTPException(status_code=400, detail="Nenhum campo enviado para atualizacao")
+    # AUTH-2: operador edits only system_prompt/ativo; any other field needs
+    # agente.editar. Checked before any lock or write.
+    if not pode(principal, P.AGENTE_EDITAR) and set(payload) - CAMPOS_OPERACIONAIS:
+        await auditoria.registrar_isolado(
+            sessions, "acesso_negado", resultado="negado", **auditoria.ator(principal),
+            detalhe={"metodo": "PUT", "rota": "/agentes/{agente_id}", "permissoes": [P.AGENTE_EDITAR.value],
+                     "campos": sorted(set(payload) - CAMPOS_OPERACIONAIS)},
+        )
+        raise proibido()
 
     def prepare(agente_atual, values: dict) -> dict:
         if "modelo_llm" in values or "modelo_openai" in values:
@@ -196,6 +230,10 @@ async def atualizar_agente(
 
     if result is None:
         raise HTTPException(status_code=404, detail="Agente nao encontrado")
+    await auditoria.registrar(
+        db, "agente_atualizado", **auditoria.ator(principal), alvo_tipo="agente", alvo_id=agente_id,
+        detalhe={"campos": sorted(payload)},
+    )
     return result.agent
 
 
@@ -203,6 +241,7 @@ async def atualizar_agente(
 async def deletar_agente(
     agente_id: int,
     db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(exigir(P.AGENTE_EXCLUIR)),
 ):
     def runtime_guard(state) -> None:
         compatible = bool(
@@ -242,10 +281,17 @@ async def deletar_agente(
         raise HTTPException(status_code=409, detail="Agente possui historico retido") from None
     if result == "not_found":
         raise HTTPException(status_code=404, detail="Agente nao encontrado")
+    await auditoria.registrar(
+        db, "agente_excluido", **auditoria.ator(principal), alvo_tipo="agente", alvo_id=agente_id,
+    )
     return None
 
 
-@router.get("/{agente_id}/consumo", response_model=AgenteConsumoResponseSchema)
+@router.get(
+    "/{agente_id}/consumo",
+    response_model=AgenteConsumoResponseSchema,
+    dependencies=[Depends(exigir(P.CONSUMO_LER))],
+)
 async def consumo_agente(
     agente_id: int,
     inicio: datetime | None = None,

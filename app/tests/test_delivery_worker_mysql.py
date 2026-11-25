@@ -28,6 +28,7 @@ from src.database.repositories import (
     sessao_repo,
 )
 from src.services.delivery_adapters import DeliveryResult
+from tests import auth_fixtures
 
 
 TEST_DATABASE_URL = os.getenv("OUTBOX_TEST_DATABASE_URL")
@@ -772,7 +773,7 @@ class DeliveryWorkerMySQLTests(unittest.IsolatedAsyncioTestCase):
                     await sessoes_router.deletar_sessao(
                         telefone=phone,
                         agente_id=self.agente_id,
-                        db=db,
+                        db=db, principal=auth_fixtures.ADMIN
                     )
                 self.assertEqual(raised.exception.status_code, 409)
                 await db.rollback()
@@ -781,7 +782,7 @@ class DeliveryWorkerMySQLTests(unittest.IsolatedAsyncioTestCase):
                 resumed = await sessoes_router.retomar_sessao(
                     telefone=phone,
                     agente_id=self.agente_id,
-                    db=db,
+                    db=db, principal=auth_fixtures.ADMIN
                 )
                 await db.commit()
             self.assertEqual(resumed["status"], "resumed")

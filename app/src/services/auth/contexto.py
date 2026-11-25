@@ -1,7 +1,7 @@
 """FastAPI dependencies that authenticate every /agentes, /sessoes, /auth call.
 
 Fail closed: no credential or an invalid one → 401; authenticated without the
-required role → 403; auth not provisioned or its DB unavailable → 503.
+required permission → 403 (``rbac.exigir``); auth not provisioned or its DB unavailable → 503.
 Validation runs in its own short transaction on ``get_auth_sessions`` (never
 the route's ``get_db`` session) and yields an immutable scalar ``Principal``;
 no ORM row reaches a route, so the domain UoW starts clean (§16.1 A1).
@@ -10,7 +10,7 @@ no ORM row reaches a route, so the domain UoW starts clean (§16.1 A1).
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import Literal
 
@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from src.config import settings
 from src.database.connection import AsyncSessionLocal
 from src.database.repositories import auth_repo, scheduler_repo
-from src.services.auth import segredos
+from src.services.auth import origem, segredos
 
 
 SESSION_COOKIE = "__Host-wpp_sessao"
@@ -45,6 +45,8 @@ class Principal:
     papel: str
     sessao_id: int | None = None
     via_cookie: bool = False
+    # Real client address (services/auth/origem.py), for audit only.
+    origem_ip: str | None = None
 
 
 @dataclass(frozen=True)
@@ -74,7 +76,9 @@ def indisponivel() -> HTTPException:
 
 
 def exigir_configuracao() -> None:
-    if not settings.auth_password_pepper_configured():
+    """Pepper and TOTP keyrings both provisioned (admin login needs TOTP)."""
+
+    if not settings.auth_configured():
         raise indisponivel()
 
 
@@ -84,6 +88,8 @@ def sessao_vigente(sessao, usuario, agora: datetime) -> bool:
         and sessao.expira_em > agora
         and sessao.ultimo_uso_em > agora - SESSAO_OCIOSA
         and usuario.status == "ativo"
+        # AUTH-2: an admin session is valid only while TOTP stays enrolled.
+        and (usuario.papel != "admin" or usuario.totp_confirmado_em is not None)
     )
 
 
@@ -165,7 +171,7 @@ async def autenticar(
         )
         if principal is None:
             raise nao_autenticado()
-        return principal
+        return replace(principal, origem_ip=await origem.cliente(request))
     if cookie is None:
         raise nao_autenticado()
     token_hash = segredos.digest_se_valido("sessao", cookie)
@@ -178,12 +184,4 @@ async def autenticar(
         request.headers.get(CSRF_HEADER), valida.csrf_hash
     ):
         raise proibido("csrf invalido")
-    return valida.principal
-
-
-async def exigir_admin(principal: Principal = Depends(autenticar)) -> Principal:
-    """AUTH-1 authorization: only ``admin`` reaches /agentes and /sessoes."""
-
-    if principal.papel != "admin":
-        raise proibido()
-    return principal
+    return replace(valida.principal, origem_ip=await origem.cliente(request))

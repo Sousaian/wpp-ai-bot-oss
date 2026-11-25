@@ -1,3 +1,5 @@
+import base64
+import binascii
 import hashlib
 import json
 import re
@@ -188,6 +190,13 @@ class Settings(BaseSettings):
         default_factory=dict,
         repr=False,
     )
+    # AES-256-GCM keys for TOTP secrets, JSON {"version": base64(32 bytes)}.
+    # Without them no admin can log in (TOTP is mandatory for admin).
+    auth_totp_encryption_current_version: int = Field(default=1, ge=1, le=65535)
+    auth_totp_encryption_keys: dict[int, SecretStr] = Field(
+        default_factory=dict,
+        repr=False,
+    )
 
     # Only this peer may name the client in X-Forwarded-For (Compose service
     # name or one literal IP; empty trusts nobody). Never "*" or a range.
@@ -232,6 +241,8 @@ class Settings(BaseSettings):
     def auth_keyrings_are_valid(self) -> "Settings":
         if self.auth_password_pepper_keys and not self.auth_password_pepper_configured():
             raise ValueError("auth password pepper keyring is invalid")
+        if self.auth_totp_encryption_keys and not self.auth_totp_configured():
+            raise ValueError("auth totp encryption keyring is invalid")
         return self
 
     @model_validator(mode="after")
@@ -370,6 +381,16 @@ class Settings(BaseSettings):
             _auth_secret_is_usable(secret) for secret in keys.values()
         )
 
+    def auth_totp_configured(self) -> bool:
+        """Current version present; every retained key decodes to 32 bytes."""
+        keys = self.auth_totp_encryption_keys
+        return bool(keys) and self.auth_totp_encryption_current_version in keys and all(
+            _aes256_key_is_usable(secret) for secret in keys.values()
+        )
+
+    def auth_configured(self) -> bool:
+        return self.auth_password_pepper_configured() and self.auth_totp_configured()
+
     def receipt_hmac_keyring_fingerprint(self) -> str:
         """Bind readiness snapshots to every retained key, without exposing keys."""
         if not self.receipt_hmac_keyring_is_valid():
@@ -408,6 +429,16 @@ def _auth_secret_is_usable(secret: object) -> bool:
         len(value) >= AUTH_SECRET_MIN_LENGTH
         and not folded.startswith(("replace-", "change-me", "sua-", "gere-"))
     )
+
+
+def _aes256_key_is_usable(secret: object) -> bool:
+    if not isinstance(secret, SecretStr):
+        return False
+    try:
+        raw = base64.b64decode(secret.get_secret_value().strip(), validate=True)
+    except (binascii.Error, ValueError):
+        return False
+    return len(raw) == 32 and len(set(raw)) > 1
 
 
 @lru_cache()

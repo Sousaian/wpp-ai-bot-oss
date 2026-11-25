@@ -18,7 +18,7 @@ from sqlalchemy import (
     UniqueConstraint,
     text,
 )
-from sqlalchemy.dialects.mysql import BIGINT, CHAR, DATETIME, ENUM as MYSQL_ENUM, INTEGER, SMALLINT, VARBINARY
+from sqlalchemy.dialects.mysql import BIGINT, CHAR, DATETIME, ENUM as MYSQL_ENUM, INTEGER, SMALLINT
 from sqlalchemy.orm import relationship, DeclarativeBase
 from datetime import datetime
 from uuid import uuid4
@@ -1457,7 +1457,9 @@ class AuthUsuario(Base):
     status = Column(String(16, collation="ascii_bin"), nullable=False)
     senha_hash = Column(String(255, collation="ascii_bin"), nullable=True)
     senha_pepper_versao = Column(INTEGER(unsigned=True), nullable=True)
-    totp_segredo_cifrado = Column(VARBINARY(255), nullable=True)
+    # DB type VARBINARY(255) (init.sql). Bound as ASCII base64 text: the
+    # pinned aiomysql cannot bind ``bytes`` parameters; reads return bytes.
+    totp_segredo_cifrado = Column(String(255), nullable=True)
     totp_chave_versao = Column(INTEGER(unsigned=True), nullable=True)
     totp_confirmado_em = Column(DATETIME(fsp=6), nullable=True)
     totp_ultimo_passo = Column(BIGINT(unsigned=True), nullable=True)

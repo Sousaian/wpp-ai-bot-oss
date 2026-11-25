@@ -7,7 +7,9 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config import settings
-from src.services.auth.contexto import exigir_admin
+from src.services.auth import auditoria
+from src.services.auth.contexto import Principal
+from src.services.auth.rbac import Permissao as P, exigir, exigir_rota_declarada, pode
 from src.database import db_errors
 from src.database.connection import get_db
 from src.database.repositories import (
@@ -72,11 +74,28 @@ class OperacaoSessaoResponseSchema(BaseModel):
     telefone: str
 
 
-# AUTH-1: every route of this router requires an authenticated admin;
-# a route added later inherits the guard (fail closed).
+# AUTH-2: every route declares exactly one ``exigir(...)``; the router guard
+# refuses (403) a route added without one (fail closed).
 router = APIRouter(
-    prefix="/sessoes", tags=["sessoes"], dependencies=[Depends(exigir_admin)]
+    prefix="/sessoes", tags=["sessoes"], dependencies=[Depends(exigir_rota_declarada)]
 )
+
+
+def _visivel(principal: Principal, sessao) -> SessaoResponseSchema:
+    """``leitura`` (no sessao.ler_telefone) sees every phone masked."""
+
+    resposta = SessaoResponseSchema.model_validate(sessao)
+    if not pode(principal, P.SESSAO_LER_TELEFONE):
+        resposta = resposta.model_copy(update={"telefone": auditoria.mascarar_telefone(resposta.telefone)})
+    return resposta
+
+
+async def _auditar(db: AsyncSession, evento: str, principal: Principal, *, agente_id: int,
+                   telefone: str, sessao_id: int | None = None) -> None:
+    await auditoria.registrar(
+        db, evento, **auditoria.ator(principal), alvo_tipo="sessao", alvo_id=sessao_id,
+        detalhe={"agente_id": agente_id, "telefone_mascarado": auditoria.mascarar_telefone(telefone)},
+    )
 
 
 async def _lock_runtime_authority(db: AsyncSession) -> None:
@@ -122,9 +141,10 @@ async def listar_sessoes(
     agente_id: int | None = Query(default=None, ge=1),
     handler: Literal["bot", "humano", "encerrada"] | None = Query(default=None),
     db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(exigir(P.SESSAO_LER)),
 ):
     sessoes = await sessao_repo.get_all(db, agente_id=agente_id, handler=handler)
-    return {"total": len(sessoes), "sessoes": sessoes}
+    return {"total": len(sessoes), "sessoes": [_visivel(principal, s) for s in sessoes]}
 
 
 @router.get("/{telefone}", response_model=SessaoResponseSchema)
@@ -132,9 +152,10 @@ async def detalhar_sessao(
     telefone: str,
     agente_id: int = Query(..., ge=1),
     db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(exigir(P.SESSAO_LER)),
 ):
     sessao, _ = await _buscar_sessao_por_telefone(db, agente_id, telefone)
-    return sessao
+    return _visivel(principal, sessao)
 
 
 def _foreign_key_restrict(exc: IntegrityError) -> bool:
@@ -148,6 +169,7 @@ async def transferir_sessao(
     agente_id: int = Query(..., ge=1),
     motivo: str | None = Query(default=None, min_length=1),
     db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(exigir(P.SESSAO_TRANSFERIR)),
 ):
     telefone_normalizado = _normalizar_telefone(telefone)
     if not telefone_normalizado:
@@ -165,6 +187,8 @@ async def transferir_sessao(
     )
     if result is None:
         raise HTTPException(status_code=404, detail="Sessao nao encontrada")
+    await _auditar(db, "sessao_transferida", principal, agente_id=agente_id,
+                   telefone=telefone_normalizado, sessao_id=result.sessao_id)
 
     return {
         "status": "transferred",
@@ -178,6 +202,7 @@ async def retomar_sessao(
     telefone: str,
     agente_id: int = Query(..., ge=1),
     db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(exigir(P.SESSAO_RETOMAR)),
 ):
     telefone_normalizado = _normalizar_telefone(telefone)
     if not telefone_normalizado:
@@ -192,6 +217,8 @@ async def retomar_sessao(
     result = await lifecycle_repo.run_with_deadlock_retry(db, operation)
     if result is None:
         raise HTTPException(status_code=404, detail="Sessao nao encontrada")
+    await _auditar(db, "sessao_retomada", principal, agente_id=agente_id,
+                   telefone=telefone_normalizado, sessao_id=result.sessao_id)
 
     return {
         "status": "resumed",
@@ -205,6 +232,7 @@ async def deletar_sessao(
     telefone: str,
     agente_id: int = Query(..., ge=1),
     db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(exigir(P.SESSAO_EXCLUIR)),
 ):
     telefone_normalizado = _normalizar_telefone(telefone)
     if not telefone_normalizado:
@@ -240,10 +268,15 @@ async def deletar_sessao(
         ) from None
     if result == "not_found":
         raise HTTPException(status_code=404, detail="Sessao nao encontrada")
+    await _auditar(db, "sessao_excluida", principal, agente_id=agente_id, telefone=telefone_normalizado)
     return None
 
 
-@router.get("/{telefone}/historico", response_model=HistoricoSessaoResponseSchema)
+@router.get(
+    "/{telefone}/historico",
+    response_model=HistoricoSessaoResponseSchema,
+    dependencies=[Depends(exigir(P.SESSAO_LER))],
+)
 async def historico_sessao(
     telefone: str,
     agente_id: int = Query(..., ge=1),

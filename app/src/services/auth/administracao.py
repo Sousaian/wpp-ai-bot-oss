@@ -3,7 +3,9 @@
 Plaintext tokens are returned exactly once to the caller (the CLI prints
 them); only their SHA-256 is stored. Role change, deactivation and every
 reset revoke the user's sessions in the same transaction. The last usable
-admin can never be demoted or disabled (admin range locked first).
+admin can never be demoted or disabled (admin range locked first). Every
+mutation writes its ``auth_auditoria`` row (``ator_tipo=cli``, operator
+label from ``--actor``) in the same transaction; e-mails are masked.
 """
 
 from __future__ import annotations
@@ -15,8 +17,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.database.models import AUTH_PAPEIS, AUTH_PAPEIS_TOKEN_SERVICO
 from src.database.repositories import auth_repo
+from src.services.auth import auditoria, segredos
 from src.services.auth import origem as origem_rede
-from src.services.auth import segredos
 from src.services.auth.contexto import run_auth_transaction
 from src.services.auth.sessao import (
     TOKEN_ATIVACAO_VALIDADE,
@@ -27,7 +29,7 @@ from src.services.auth.sessao import (
 
 TOKEN_SERVICO_MAX_DIAS = 365
 NOME_TOKEN_MAX = 100
-TIPOS_RESET = {"senha": "reset_senha", "ativacao": "ativacao"}
+TIPOS_RESET = {"senha": "reset_senha", "mfa": "reset_mfa", "ativacao": "ativacao"}
 
 
 class Recusado(Exception):
@@ -52,6 +54,13 @@ def _papel(papel: str, permitidos=AUTH_PAPEIS) -> str:
     return papel
 
 
+async def _audit(db: AsyncSession, evento: str, ator: str, *, alvo_tipo: str, alvo_id: object,
+                 detalhe: dict[str, object] | None = None) -> None:
+    await auditoria.registrar(
+        db, evento, ator_tipo="cli", ator_rotulo=ator, alvo_tipo=alvo_tipo, alvo_id=alvo_id, detalhe=detalhe
+    )
+
+
 def _admin_utilizavel(usuario) -> bool:
     return usuario.papel == "admin" and usuario.status == "ativo"
 
@@ -66,7 +75,7 @@ async def _emitir(db: AsyncSession, *, usuario_id: int, tipo: str, agora: dateti
     return TokenEmitido(usuario_id, tipo, token, expira_em)
 
 
-async def bootstrap_admin(sessions: async_sessionmaker[AsyncSession], *, email: str) -> TokenEmitido:
+async def bootstrap_admin(sessions: async_sessionmaker[AsyncSession], *, ator: str, email: str) -> TokenEmitido:
     """First admin only: refused once any admin row (any status) exists."""
 
     canonico = canonicalizar_email(email)
@@ -79,13 +88,15 @@ async def bootstrap_admin(sessions: async_sessionmaker[AsyncSession], *, email: 
             usuario = await auth_repo.criar_usuario(db, email=canonico, papel="admin", status="pendente")
         except auth_repo.EmailIndisponivel:
             raise Recusado("email_indisponivel") from None
+        await _audit(db, "bootstrap_admin", ator, alvo_tipo="usuario", alvo_id=usuario.id,
+                     detalhe={"email_mascarado": auditoria.mascarar_email(canonico), "papel": "admin"})
         return await _emitir(db, usuario_id=int(usuario.id), tipo="ativacao", agora=agora)
 
     return await run_auth_transaction(sessions, op)
 
 
 async def criar_usuario(
-    sessions: async_sessionmaker[AsyncSession], *, email: str, papel: str
+    sessions: async_sessionmaker[AsyncSession], *, ator: str, email: str, papel: str
 ) -> TokenEmitido:
     canonico = canonicalizar_email(email)
     _papel(papel)
@@ -98,6 +109,8 @@ async def criar_usuario(
             usuario = await auth_repo.criar_usuario(db, email=canonico, papel=papel, status="pendente")
         except auth_repo.EmailIndisponivel:
             raise Recusado("email_indisponivel") from None
+        await _audit(db, "usuario_criado", ator, alvo_tipo="usuario", alvo_id=usuario.id,
+                     detalhe={"email_mascarado": auditoria.mascarar_email(canonico), "papel": papel})
         return await _emitir(db, usuario_id=int(usuario.id), tipo="ativacao", agora=agora)
 
     return await run_auth_transaction(sessions, op)
@@ -117,7 +130,7 @@ def _ultimo_admin(admins, usuario) -> bool:
 
 
 async def alterar_papel(
-    sessions: async_sessionmaker[AsyncSession], *, usuario_id: int, papel: str
+    sessions: async_sessionmaker[AsyncSession], *, ator: str, usuario_id: int, papel: str
 ) -> dict[str, object]:
     _papel(papel)
 
@@ -134,14 +147,18 @@ async def alterar_papel(
         revogadas = await auth_repo.revogar_sessoes_usuario(
             db, usuario_id=usuario_id, motivo="papel_alterado", agora=agora
         )
+        await _audit(db, "usuario_papel_alterado", ator, alvo_tipo="usuario", alvo_id=usuario_id,
+                     detalhe={"papel_anterior": anterior, "papel": papel, "sessoes_revogadas": revogadas})
         return {"usuario_id": usuario_id, "papel_anterior": anterior, "papel": papel,
-                "sessoes_revogadas": revogadas}
+                "sessoes_revogadas": revogadas,
+                # An admin logs in only after TOTP: issue `reset --tipo mfa` if absent.
+                "mfa_requerido": papel == "admin" and usuario.totp_confirmado_em is None}
 
     return await run_auth_transaction(sessions, op)
 
 
 async def alterar_status(
-    sessions: async_sessionmaker[AsyncSession], *, usuario_id: int, ativo: bool
+    sessions: async_sessionmaker[AsyncSession], *, ator: str, usuario_id: int, ativo: bool
 ) -> dict[str, object]:
     async def op(db: AsyncSession) -> dict[str, object]:
         admins, usuario = await _lock_alvo(db, usuario_id)
@@ -157,19 +174,23 @@ async def alterar_status(
                 db, usuario_id=usuario_id, motivo="usuario_desativado", agora=agora
             )
             await auth_repo.revogar_tokens_uso_unico(db, usuario_id=usuario_id, agora=agora)
+            await _audit(db, "usuario_desativado", ator, alvo_tipo="usuario", alvo_id=usuario_id,
+                         detalhe={"sessoes_revogadas": revogadas})
             return {"usuario_id": usuario_id, "status": "desativado", "sessoes_revogadas": revogadas}
         if usuario.status != "desativado":
             raise Recusado("status_inalterado")
         # Reactivation needs a usable password; otherwise use a reset token.
         usuario.status = "ativo" if usuario.senha_hash else "pendente"
         await db.flush()
+        await _audit(db, "usuario_reativado", ator, alvo_tipo="usuario", alvo_id=usuario_id,
+                     detalhe={"status": usuario.status})
         return {"usuario_id": usuario_id, "status": usuario.status, "sessoes_revogadas": 0}
 
     return await run_auth_transaction(sessions, op)
 
 
 async def emitir_reset(
-    sessions: async_sessionmaker[AsyncSession], *, usuario_id: int, tipo: str
+    sessions: async_sessionmaker[AsyncSession], *, ator: str, usuario_id: int, tipo: str
 ) -> TokenEmitido:
     tipo_token = TIPOS_RESET.get(tipo)
     if tipo_token is None:
@@ -184,16 +205,18 @@ async def emitir_reset(
         if (tipo_token == "ativacao") != (usuario.status == "pendente"):
             raise Recusado("tipo_incompativel_com_status")
         agora = await auth_repo.agora(db)
-        await auth_repo.revogar_sessoes_usuario(
+        revogadas = await auth_repo.revogar_sessoes_usuario(
             db, usuario_id=usuario_id, motivo="reset_emitido", agora=agora
         )
+        await _audit(db, "reset_emitido", ator, alvo_tipo="usuario", alvo_id=usuario_id,
+                     detalhe={"tipo": tipo_token, "sessoes_revogadas": revogadas})
         return await _emitir(db, usuario_id=usuario_id, tipo=tipo_token, agora=agora)
 
     return await run_auth_transaction(sessions, op)
 
 
 async def desbloquear(
-    sessions: async_sessionmaker[AsyncSession], *, usuario_id: int, origem: str | None = None
+    sessions: async_sessionmaker[AsyncSession], *, ator: str, usuario_id: int, origem: str | None = None
 ) -> dict[str, object]:
     """Clear every login delay and the TOTP lock, or one source's delay only."""
 
@@ -214,12 +237,14 @@ async def desbloquear(
             usuario.totp_bloqueado_ate = None
             await db.flush()
         removidas = await auth_repo.limpar_tentativas(db, usuario_id=usuario_id, origem=chave)
+        await _audit(db, "usuario_desbloqueado", ator, alvo_tipo="usuario", alvo_id=usuario_id,
+                     detalhe={"origens_liberadas": removidas, "tipo": "origem" if chave else "conta"})
         return {"usuario_id": usuario_id, "status": "desbloqueado", "origens_liberadas": removidas}
 
     return await run_auth_transaction(sessions, op)
 
 
-async def revogar_sessoes(sessions: async_sessionmaker[AsyncSession], *, usuario_id: int) -> dict[str, object]:
+async def revogar_sessoes(sessions: async_sessionmaker[AsyncSession], *, ator: str, usuario_id: int) -> dict[str, object]:
     async def op(db: AsyncSession) -> dict[str, object]:
         usuario = await auth_repo.lock_usuario(db, usuario_id)
         if usuario is None:
@@ -228,6 +253,8 @@ async def revogar_sessoes(sessions: async_sessionmaker[AsyncSession], *, usuario
         revogadas = await auth_repo.revogar_sessoes_usuario(
             db, usuario_id=usuario_id, motivo="operador", agora=agora
         )
+        await _audit(db, "sessoes_revogadas", ator, alvo_tipo="usuario", alvo_id=usuario_id,
+                     detalhe={"sessoes_revogadas": revogadas})
         return {"usuario_id": usuario_id, "sessoes_revogadas": revogadas}
 
     return await run_auth_transaction(sessions, op)
@@ -251,7 +278,7 @@ async def listar_usuarios(sessions: async_sessionmaker[AsyncSession]) -> list[di
 
 
 async def criar_token_servico(
-    sessions: async_sessionmaker[AsyncSession], *, nome: str, papel: str, dias: int
+    sessions: async_sessionmaker[AsyncSession], *, ator: str, nome: str, papel: str, dias: int
 ) -> dict[str, object]:
     """Service tokens never carry ``admin``: that role requires human MFA."""
 
@@ -269,6 +296,8 @@ async def criar_token_servico(
             db, nome=nome, papel=papel, token_hash=token_hash, agora=agora,
             expira_em=agora + timedelta(days=dias),
         )
+        await _audit(db, "token_servico_criado", ator, alvo_tipo="token_servico", alvo_id=row.id,
+                     detalhe={"papel": papel})
         return {"id": int(row.id), "nome": nome, "papel": papel, "expira_em": row.expira_em.isoformat(),
                 "token": token}
 
@@ -292,7 +321,7 @@ async def listar_tokens_servico(sessions: async_sessionmaker[AsyncSession]) -> l
     return await run_auth_transaction(sessions, op)
 
 
-async def revogar_token_servico(sessions: async_sessionmaker[AsyncSession], *, token_id: int) -> dict[str, object]:
+async def revogar_token_servico(sessions: async_sessionmaker[AsyncSession], *, ator: str, token_id: int) -> dict[str, object]:
     async def op(db: AsyncSession) -> dict[str, object]:
         agora = await auth_repo.agora(db)
         result = await auth_repo.revogar_token_servico(db, token_id=token_id, agora=agora)
@@ -300,6 +329,7 @@ async def revogar_token_servico(sessions: async_sessionmaker[AsyncSession], *, t
             raise Recusado("token_inexistente")
         if result is False:
             raise Recusado("token_ja_revogado")
+        await _audit(db, "token_servico_revogado", ator, alvo_tipo="token_servico", alvo_id=token_id)
         return {"id": token_id, "status": "revogado"}
 
     return await run_auth_transaction(sessions, op)

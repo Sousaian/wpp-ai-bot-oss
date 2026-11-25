@@ -41,6 +41,17 @@ def atraso(falhas: int) -> timedelta:
     return min(ATRASO_BASE * (2 ** min(falhas - FALHAS_LIVRES, 16)), ATRASO_MAXIMO)
 
 
+# Second factor, per account: reachable only after the correct password.
+TOTP_FALHAS_ATE_BLOQUEIO = 10
+TOTP_BLOQUEIO_MAXIMO = timedelta(hours=1)
+
+
+def bloqueio_totp(bloqueios_anteriores: int) -> timedelta:
+    """15 min, 30 min, then 1 h; cleared by a correct code or the CLI."""
+
+    return min(timedelta(minutes=15) * (2 ** min(max(bloqueios_anteriores, 0), 8)), TOTP_BLOQUEIO_MAXIMO)
+
+
 def atrasado(liberado_em: datetime | None, agora: datetime) -> bool:
     return liberado_em is not None and liberado_em > agora
 
