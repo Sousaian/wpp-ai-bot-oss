@@ -15,7 +15,7 @@ ROOT = Path(os.environ.get("WPP_REPO_ROOT", Path(__file__).resolve().parents[2])
 class PasswordPolicyTests(unittest.TestCase):
     def test_boundaries_and_unicode_classes_after_nfc(self):
         accepted = [
-            "Aa1!aaaa", "A1!" + "a" * 61, "A1! aaaa", "É١!aaaaa",
+            "Aa1!aaaa", "A1!" + "a" * 61, "É١!aaaaa",
             "A1😀aaaaa", "Password1!", "A1!A1!A1!", "A1!AAAAA",
             "E\u03011!aaaaa", "E\u03011!" + "a" * 61, "A1!a\u0301aaaa", "A1!aaa\u0001a",
         ]
@@ -32,7 +32,7 @@ class PasswordPolicyTests(unittest.TestCase):
             ("A!aaaaaa", "senha_sem_numero"),
             ("a1!aaaaa", "senha_sem_maiuscula"),
             ("A1aaaaaa", "senha_sem_especial"),
-            ("A1 aaaaa", "senha_sem_especial"),
+            ("A1 aaaaa", "senha_com_espaco"),
             ("中1!中中中中中", "senha_sem_maiuscula"),
             ("A²!aaaaa", "senha_sem_numero"),
             ("A1aaaaa\u0301a", "senha_sem_especial"),
@@ -50,6 +50,17 @@ class PasswordPolicyTests(unittest.TestCase):
                     senha.normalizar(value)
                 self.assertEqual(str(caught.exception), code)
                 self.assertEqual(caught.exception.code, code)
+
+    def test_all_unicode_whitespace_is_rejected_without_trimming(self):
+        whitespace = ("\t\n\v\f\r " + "\x1c\x1d\x1e\x1f\x85\xa0\u1680"
+                      + "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
+                      + "\u2028\u2029\u202f\u205f\u3000")
+        for char in whitespace:
+            for value in (char + "Aa1!aaaa", "Aa1!" + char + "aaaa", "Aa1!aaaa" + char):
+                with self.subTest(codepoint=ord(char), value=value):
+                    with self.assertRaises(senha.SenhaRecusada) as caught:
+                        senha.normalizar(value)
+                    self.assertEqual(caught.exception.code, "senha_com_espaco")
 
 
 class PasswordBoundaryTests(unittest.TestCase):

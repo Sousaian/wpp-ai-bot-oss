@@ -24,7 +24,7 @@ CHILD = r'''
 import asyncio, json, resource, time
 from src.services.auth import senha
 async def main():
-    stored, version = await senha.gerar_hash("Frase longa sintetica 42!")
+    stored, version = await senha.gerar_hash("FraseLongaSintetica42!")
     base = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     lag, stop = [0.0], False
     async def ticker():
@@ -124,11 +124,11 @@ class HashCapacityTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(settings, "auth_password_pepper_keys", keys):
             for memory, cost, lanes in ((65536, 3, 4), (32768, 4, 1), (32768, 3, 2)):
                 legacy = PasswordHasher(time_cost=cost, memory_cost=memory, parallelism=lanes, type=Type.ID)
-                stored = legacy.hash(senha._peppered("Frase longa sintetica 42!", 1))
-                self.assertEqual(await senha.verificar("Frase longa sintetica 42!", stored, 1),
+                stored = legacy.hash(senha._peppered("FraseLongaSintetica42!", 1))
+                self.assertEqual(await senha.verificar("FraseLongaSintetica42!", stored, 1),
                                  senha.Verificacao(ok=False, precisa_rehash=False))
-            stored, version = await senha.gerar_hash("Frase longa sintetica 42!")
-            self.assertTrue((await senha.verificar("Frase longa sintetica 42!", stored, version)).ok)
+            stored, version = await senha.gerar_hash("FraseLongaSintetica42!")
+            self.assertTrue((await senha.verificar("FraseLongaSintetica42!", stored, version)).ok)
 
     async def test_wait_is_bounded(self) -> None:
         pool, release = senha.PiscinaHash(workers=1, fila=2), threading.Event()
